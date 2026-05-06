@@ -270,6 +270,8 @@ export default function Marbles() {
   }, []);
 
   // Tilt → gravity vector (DeviceOrientation). Smoothly lerped.
+  // On iOS 13+ the listener is silent until requestPermission() resolves
+  // 'granted' inside a user gesture — see requestMotionPerms() below.
   useEffect(() => {
     function onOrient(e: DeviceOrientationEvent) {
       // gamma: -90..90 left/right, beta: -180..180 forward/back
@@ -284,6 +286,44 @@ export default function Marbles() {
     window.addEventListener('deviceorientation', onOrient);
     return () => window.removeEventListener('deviceorientation', onOrient);
   }, []);
+
+  // Shake-to-spring: detect a sharp acceleration spike and trigger shakeAll().
+  // We track shakeAll via a ref so the listener (set up once) always sees the
+  // latest closure (gameOver state, latest stock counts, etc.).
+  const shakeAllRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    let lastFire = 0;
+    function onMotion(e: DeviceMotionEvent) {
+      const accel = e.acceleration && e.acceleration.x !== null ? e.acceleration : null;
+      const a = accel ?? e.accelerationIncludingGravity;
+      if (!a) return;
+      const ax = a.x ?? 0, ay = a.y ?? 0, az = a.z ?? 0;
+      const mag = Math.sqrt(ax * ax + ay * ay + az * az);
+      // `acceleration` rest ≈ 0; `accelerationIncludingGravity` rest ≈ 9.8.
+      const threshold = accel ? 16 : 24;
+      const now = performance.now();
+      if (mag > threshold && now - lastFire > 600) {
+        lastFire = now;
+        shakeAllRef.current();
+      }
+    }
+    window.addEventListener('devicemotion', onMotion);
+    return () => window.removeEventListener('devicemotion', onMotion);
+  }, []);
+
+  // iOS 13+ gates motion / orientation behind a per-session permission
+  // prompt that MUST be triggered by a user gesture. Fire-and-forget on the
+  // first tap; gracefully no-ops on browsers without the requestPermission.
+  const motionPermsRef = useRef(false);
+  const requestMotionPerms = () => {
+    if (motionPermsRef.current) return;
+    motionPermsRef.current = true;
+    type Reqable = { requestPermission?: () => Promise<'granted' | 'denied' | 'default'> };
+    const o = (DeviceOrientationEvent as unknown as Reqable);
+    const m = (DeviceMotionEvent as unknown as Reqable);
+    try { void o.requestPermission?.().catch(() => {}); } catch { /* not supported */ }
+    try { void m.requestPermission?.().catch(() => {}); } catch { /* not supported */ }
+  };
 
   // Main RAF loop
   useEffect(() => {
@@ -982,6 +1022,8 @@ export default function Marbles() {
     shakeFlashRef.current = 1;
     playThud();
   };
+  // Keep the motion listener pointing at the latest shakeAll closure.
+  shakeAllRef.current = shakeAll;
 
   // Wipe everything for a fresh run.
   const resetGame = () => {
@@ -1089,6 +1131,7 @@ export default function Marbles() {
 
   // Tap on canvas → drop a random-color ball from the top at the touched X
   const onCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    requestMotionPerms();
     const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
     const x = e.clientX - rect.left;
     longPressFiredRef.current = false;
@@ -1104,6 +1147,7 @@ export default function Marbles() {
 
   // Tap on a swatch in the tray → drop that color from the swatch's center X
   const onSwatchPress = (color: string, e: React.PointerEvent<HTMLButtonElement>) => {
+    requestMotionPerms();
     const rect = e.currentTarget.getBoundingClientRect();
     dropFromTop(rect.left + rect.width / 2, color);
   };
@@ -1140,7 +1184,7 @@ export default function Marbles() {
             <button
               type="button"
               className="mb__shake"
-              onPointerDown={shakeAll}
+              onPointerDown={() => { requestMotionPerms(); shakeAll(); }}
               aria-label="shake to shuffle"
             />
           </div>
