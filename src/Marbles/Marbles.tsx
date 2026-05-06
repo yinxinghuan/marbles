@@ -1,23 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import './Marbles.less';
 
-// ── Aesthetic palette: muted Morandi heirloom colors with one rare accent ───
-interface ColorEntry { hex: string; weight: number }
+// ── Aesthetic palette: 6 distinct hues so same-color merge is unambiguous ──
+// Each spans the color wheel (red / yellow / green / blue / pink / cream)
+// while keeping the muted Morandi vibe — saturated enough to pair-spot.
+interface ColorEntry { hex: string }
 const PALETTE: ColorEntry[] = [
-  { hex: '#D9B391', weight: 25 }, // peach sand
-  { hex: '#A98E73', weight: 20 }, // warm taupe
-  { hex: '#7B8B7E', weight: 15 }, // sage gray
-  { hex: '#6B7B91', weight: 12 }, // muted slate
-  { hex: '#9C7187', weight: 10 }, // dusty plum
-  { hex: '#C7A875', weight: 10 }, // golden ochre
-  { hex: '#E8D4B5', weight: 6  }, // ivory cream
-  { hex: '#B8513E', weight: 2  }, // terracotta — rare accent
+  { hex: '#C44E3D' }, // terracotta red
+  { hex: '#D4A857' }, // mustard yellow
+  { hex: '#6E9070' }, // sage green
+  { hex: '#5B7593' }, // slate blue
+  { hex: '#C18A9A' }, // dusty rose
+  { hex: '#E8D4B5' }, // ivory cream
 ];
-const PALETTE_TOTAL = PALETTE.reduce((s, c) => s + c.weight, 0);
 function pickColor(): string {
-  let r = Math.random() * PALETTE_TOTAL;
-  for (const c of PALETTE) { if ((r -= c.weight) <= 0) return c.hex; }
-  return PALETTE[0].hex;
+  return PALETTE[Math.floor(Math.random() * PALETTE.length)].hex;
 }
 
 // ── Physics constants ──────────────────────────────────────────────────────
@@ -32,12 +29,41 @@ const MAX_R = 30;
 const MAX_BALLS = 140;            // soft cap — oldest fade out beyond
 
 interface Ball {
+  id: number;
   x: number; y: number;
   vx: number; vy: number;
   r: number;
   color: string;
   born: number;                   // ms
   fading: number;                 // 0..1 → 0 means fading to gone
+  bornGlow: number;               // 0..1, freshly merged balls glow briefly
+}
+
+interface BurstParticle {
+  x: number; y: number;
+  vx: number; vy: number;
+  r: number;
+  color: string;
+  life: number;                   // 0..1, 0 = dead
+}
+
+const BURST_RADIUS = 68;          // merged ball larger than this → burst
+
+// ── Top tray layout (single source of truth — canvas + DOM share this) ────
+const HOLE_DIA = 52;              // recessed sockets: bigger touch target
+const HOLE_GAP = 6;
+const SHAKE_GAP = 10;             // extra space between last hole and shake dome
+const TRAY_TOP_Y = 18;
+function trayLayout(canvasW: number) {
+  const total = PALETTE.length * HOLE_DIA + (PALETTE.length - 1) * HOLE_GAP + SHAKE_GAP + HOLE_DIA;
+  const startX = (canvasW - total) / 2;
+  const holes = PALETTE.map((c, i) => ({
+    color: c.hex,
+    cx: startX + HOLE_DIA / 2 + i * (HOLE_DIA + HOLE_GAP),
+    cy: TRAY_TOP_Y + HOLE_DIA / 2,
+  }));
+  const shakeCx = startX + PALETTE.length * (HOLE_DIA + HOLE_GAP) + (SHAKE_GAP - HOLE_GAP) + HOLE_DIA / 2;
+  return { startX, total, holes, shakeCx, shakeCy: TRAY_TOP_Y + HOLE_DIA / 2 };
 }
 
 // ── Hex parsing helper ────────────────────────────────────────────────────
@@ -49,6 +75,23 @@ function shadeHex(hex: string, amount: number): string {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
+// ── Pegs (chime obstacles) — each tuned to a C-major pentatonic note ─────
+// Position is % of canvas; radius in px. Notes descend top → bottom for a
+// "raindrops-on-windchime" cascade as balls fall through.
+interface PegDef { xPct: number; yPct: number; r: number; freq: number }
+const PEGS: PegDef[] = [
+  { xPct: 22, yPct: 24, r: 9, freq: 880.00 }, // A5  ── top row (under tray)
+  { xPct: 76, yPct: 21, r: 8, freq: 783.99 }, // G5
+  { xPct: 50, yPct: 32, r: 9, freq: 659.25 }, // E5
+  { xPct: 14, yPct: 40, r: 8, freq: 587.33 }, // D5
+  { xPct: 88, yPct: 38, r: 8, freq: 523.25 }, // C5
+  { xPct: 36, yPct: 48, r: 9, freq: 440.00 }, // A4
+  { xPct: 64, yPct: 50, r: 9, freq: 392.00 }, // G4
+  { xPct: 24, yPct: 60, r: 8, freq: 329.63 }, // E4
+  { xPct: 78, yPct: 64, r: 8, freq: 293.66 }, // D4
+  { xPct: 50, yPct: 68, r: 9, freq: 261.63 }, // C4  ── lowest, bottom row
+];
+
 export default function Marbles() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const ballsRef = useRef<Ball[]>([]);
@@ -57,8 +100,91 @@ export default function Marbles() {
   const grainRef = useRef<HTMLCanvasElement | null>(null);
   const longPressRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressFiredRef = useRef(false);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  // Per-peg flash timer (0 = no flash, 1 = just hit, decays to 0)
+  const pegFlashRef = useRef<number[]>(PEGS.map(() => 0));
+  // Burst particles spawned when a merged ball exceeds the size cap
+  const burstsRef = useRef<BurstParticle[]>([]);
+  const ballIdRef = useRef(0);
+  // Per-color budget — each color starts with this many marbles. Counts down
+  // as the player drops; when ANY color hits 0 the run ends.
+  const STARTING_BUDGET = 99;
+  const colorCountsRef = useRef<Record<string, number>>(
+    Object.fromEntries(PALETTE.map(c => [c.hex, STARTING_BUDGET])),
+  );
+  // Total balls that have burst this run — score = bursts × 100
+  const burstScoreRef = useRef(0);
+  // Per-color timestamp of the last decrement — used to flash the countdown
+  // number and float a small "−1" tick when the player spends a ball.
+  const colorChangeRef = useRef<Record<string, number>>({});
+  // Combo: bursts within COMBO_WINDOW chain together. Each chained burst
+  // beyond the first triggers a "rainbow rain" — one free ball of every color
+  // drops from the top, no stock cost.
+  const lastBurstRef = useRef(0);
+  const comboRef = useRef(0);
+  // {time, count, x, y} of the last combo trigger so we can render a brief
+  // "COMBO ×N" flourish near the burst that earned it.
+  const comboFlashRef = useRef<{ t: number; n: number; x: number; y: number } | null>(null);
+  const [scoreDisplay, setScoreDisplay] = useState(0);
+  const [gameOver, setGameOver] = useState(false);
+  const gameOverRef = useRef(false);
+  // Attract mode auto-spawn interval
+  const attractRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [hasTouched, setHasTouched] = useState(false);
-  const [count, setCount] = useState(0);
+  const hasTouchedRef = useRef(false);   // mirror of hasTouched, readable from tick
+
+  // ── Audio: synthesized chime / click — Web Audio (lazy on first gesture) ─
+  function ensureAudio() {
+    if (!audioCtxRef.current) {
+      const Ctor: typeof AudioContext | undefined =
+        window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (Ctor) audioCtxRef.current = new Ctor();
+    }
+    const ctx = audioCtxRef.current;
+    if (ctx && ctx.state === 'suspended') void ctx.resume();
+  }
+  // Per-source rate limiters so simultaneous collisions don't pile up & clip.
+  const lastSoundRef = useRef<Map<string, number>>(new Map());
+  function playChime(freq: number, vel: number, key = `chime-${freq.toFixed(1)}`) {
+    const ctx = audioCtxRef.current;
+    if (!ctx || ctx.state !== 'running') return;
+    const now = ctx.currentTime;
+    const last = lastSoundRef.current.get(key) ?? 0;
+    if (now - last < 0.18) return;            // 180ms per pitch (was 60ms)
+    // Global ceiling: don't fire more than ~10 chimes per second across all pegs
+    const lastAny = lastSoundRef.current.get('any-chime') ?? 0;
+    if (now - lastAny < 0.085) return;
+    lastSoundRef.current.set(key, now);
+    lastSoundRef.current.set('any-chime', now);
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(freq, now);
+    const v = Math.min(0.085, 0.018 + vel * 0.008);
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(v, now + 0.005);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.55);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.6);
+  }
+  // Low rumbling thud for shake
+  function playThud() {
+    const ctx = audioCtxRef.current;
+    if (!ctx || ctx.state !== 'running') return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(90, now);
+    osc.frequency.exponentialRampToValueAtTime(38, now + 0.22);
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.18, now + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.3);
+  }
 
   // Debug: ?seed=N auto-spawns N balls on mount (for screenshots / testing)
   useEffect(() => {
@@ -71,6 +197,35 @@ export default function Marbles() {
       }
     }, 100);
     return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Attract mode — drop a few demo balls on mount, then keep spawning
+  // one every ~2.6s until the user touches. Stops on first interaction.
+  useEffect(() => {
+    if (parseInt(new URLSearchParams(window.location.search).get('seed') ?? '0', 10)) return;
+    if (new URLSearchParams(window.location.search).get('poster') === '1') return;
+    let cancelled = false;
+    // Initial cascade: 4 balls staggered over the first 2 seconds
+    const initialTimers: ReturnType<typeof setTimeout>[] = [];
+    for (let i = 0; i < 4; i++) {
+      initialTimers.push(setTimeout(() => {
+        if (cancelled) return;
+        const w = window.innerWidth;
+        spawnAtAttract(60 + Math.random() * (w - 120), -20);
+      }, 350 + i * 480));
+    }
+    // Steady drip after that
+    attractRef.current = setInterval(() => {
+      if (cancelled) return;
+      const w = window.innerWidth;
+      spawnAtAttract(60 + Math.random() * (w - 120), -20);
+    }, 2800);
+    return () => {
+      cancelled = true;
+      initialTimers.forEach(clearTimeout);
+      if (attractRef.current) clearInterval(attractRef.current);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -167,7 +322,41 @@ export default function Marbles() {
         }
       }
 
+      // Ball-peg collisions — pegs are immovable; reflect ball + chime
+      for (let pi = 0; pi < PEGS.length; pi++) {
+        const peg = PEGS[pi];
+        const px = (peg.xPct / 100) * w;
+        const py = (peg.yPct / 100) * h;
+        for (const b of balls) {
+          if (b.fading < 1) continue;
+          const dx = b.x - px;
+          const dy = b.y - py;
+          const minDist = b.r + peg.r;
+          const sq = dx * dx + dy * dy;
+          if (sq >= minDist * minDist || sq < 0.01) continue;
+          const dist = Math.sqrt(sq);
+          const nx = dx / dist, ny = dy / dist;
+          // Separate
+          b.x = px + nx * minDist;
+          b.y = py + ny * minDist;
+          const vn = b.vx * nx + b.vy * ny;
+          if (vn < 0) {
+            const e = 0.74;
+            b.vx -= (1 + e) * vn * nx;
+            b.vy -= (1 + e) * vn * ny;
+            // peg flash + chime only on a clear bounce, not on micro-jitter
+            // from a settled pile pressing into the peg.
+            if (vn < -1.6) {
+              pegFlashRef.current[pi] = 1;
+              playChime(peg.freq, Math.min(-vn, 9));
+            }
+          }
+        }
+      }
+
       // Ball-ball collisions (O(n²) is fine under MAX_BALLS=140)
+      // Track same-color merge pairs to process AFTER physics resolves
+      const mergePairs: Array<[number, number]> = [];
       for (let i = 0; i < balls.length; i++) {
         const a = balls[i];
         if (a.fading < 1) continue;
@@ -178,17 +367,30 @@ export default function Marbles() {
           const dy = b.y - a.y;
           const minDist = a.r + b.r;
           const sq = dx * dx + dy * dy;
-          if (sq >= minDist * minDist || sq < 0.01) continue;
+          if (sq < 0.01) continue;
+
+          // Same-color: merge with 1px tolerance — covers settled stacks where
+          // collision resolution leaves balls touching but not overlapping.
+          if (a.color === b.color) {
+            const mergeMax = minDist + 1.0;
+            if (sq < mergeMax * mergeMax) {
+              mergePairs.push([i, j]);
+              continue;
+            }
+            continue;          // close-but-not-merging same-color, skip physics
+          }
+
+          // Different-color collision: needs actual overlap
+          if (sq >= minDist * minDist) continue;
           const dist = Math.sqrt(sq);
           const nx = dx / dist;
           const ny = dy / dist;
-          // separate by overlap (mass-weighted by radius)
           const overlap = (minDist - dist) / 2;
           a.x -= nx * overlap;
           a.y -= ny * overlap;
           b.x += nx * overlap;
           b.y += ny * overlap;
-          // velocity along normal
+          // velocity along normal — for non-merging collisions
           const rvx = b.vx - a.vx;
           const rvy = b.vy - a.vy;
           const vn = rvx * nx + rvy * ny;
@@ -208,8 +410,94 @@ export default function Marbles() {
         }
       }
 
+      // Process same-color merges. Each ball can be in at most one merge.
+      if (mergePairs.length > 0) {
+        const removed = new Set<number>();
+        const created: Ball[] = [];
+        for (const [i, j] of mergePairs) {
+          if (removed.has(i) || removed.has(j)) continue;
+          const a = balls[i], b = balls[j];
+          removed.add(i); removed.add(j);
+          // Conserve area: r_new = sqrt(r_a² + r_b²)
+          const newR = Math.sqrt(a.r * a.r + b.r * b.r);
+          const ma = a.r * a.r, mb = b.r * b.r, mt = ma + mb;
+          const nx = (a.x * ma + b.x * mb) / mt;
+          const ny = (a.y * ma + b.y * mb) / mt;
+          if (newR > BURST_RADIUS) {
+            // BURST — emit particles, drop both balls. Score +1 per burst.
+            spawnBurst(nx, ny, a.color, newR);
+            burstScoreRef.current += 1;
+            setScoreDisplay(burstScoreRef.current);
+            // ── Combo: bursts within window chain. From combo 2+ on, the
+            //    player gets a free rainbow drop (one ball of every color).
+            const tNow = performance.now();
+            const COMBO_WINDOW = 1800;
+            if (tNow - lastBurstRef.current <= COMBO_WINDOW) {
+              comboRef.current += 1;
+            } else {
+              comboRef.current = 1;
+            }
+            lastBurstRef.current = tNow;
+            if (comboRef.current >= 2) {
+              comboFlashRef.current = { t: tNow, n: comboRef.current, x: nx, y: ny };
+              // Stagger the drops slightly across the top so they don't all
+              // collide on the way down.
+              const w = sizeRef.current.w || 390;
+              for (let k = 0; k < PALETTE.length; k++) {
+                const color = PALETTE[k].hex;
+                const slotX = (w / (PALETTE.length + 1)) * (k + 1);
+                const jitter = (Math.random() - 0.5) * 30;
+                setTimeout(() => dropFreeBall(color, slotX + jitter), k * 60);
+              }
+            }
+          } else {
+            // MERGE into a single bigger ball.
+            const nvx = (a.vx * ma + b.vx * mb) / mt;
+            const nvy = (a.vy * ma + b.vy * mb) / mt;
+            created.push({
+              id: ++ballIdRef.current,
+              x: nx, y: ny,
+              vx: nvx * 0.7, vy: nvy * 0.7,
+              r: newR,
+              color: a.color,
+              born: performance.now(),
+              fading: 1,
+              bornGlow: 1,
+            });
+          }
+        }
+        if (removed.size > 0 || created.length > 0) {
+          ballsRef.current = balls.filter((_, i) => !removed.has(i)).concat(created);
+        }
+      }
+
+      // Decay born-glow on freshly-merged balls
+      for (const b of ballsRef.current) {
+        if (b.bornGlow > 0) b.bornGlow = Math.max(0, b.bornGlow - 0.024);
+      }
+
+      // Decay peg flashes
+      for (let i = 0; i < pegFlashRef.current.length; i++) {
+        if (pegFlashRef.current[i] > 0) pegFlashRef.current[i] -= 0.04;
+        if (pegFlashRef.current[i] < 0) pegFlashRef.current[i] = 0;
+      }
+
+      // Burst particles physics — small gravity-affected dots that fade out
+      const bursts = burstsRef.current;
+      for (const p of bursts) {
+        p.vy += GRAVITY_BASE * 0.6;
+        p.vx *= 0.985;
+        p.vy *= 0.985;
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life -= 0.022;
+      }
+      burstsRef.current = bursts.filter(p => p.life > 0);
+
       // ── Garbage collect fully faded ─────────────────────────────────────
-      ballsRef.current = balls.filter(b => b.fading > 0);
+      // IMPORTANT: filter the *current* ref (which may already have been
+      // rewritten by the merge step above) — not the stale `balls` snapshot.
+      ballsRef.current = ballsRef.current.filter(b => b.fading > 0);
 
       // ── Render ──────────────────────────────────────────────────────────
       ctx.clearRect(0, 0, w, h);
@@ -235,11 +523,250 @@ export default function Marbles() {
         }
       }
 
+      // ── Game title "MARBLES" — debossed into the warm dark surface.
+      // Drawn BEFORE pegs so even the pegs sit on top of the title.
+      {
+        const titleX = w / 2;
+        const titleY = h * 0.46;
+        ctx.save();
+        // Auto-fit: try 72 then shrink in steps until MARBLES fits ~84% of w.
+        // measureText doesn't account for canvas letterSpacing, so we add an
+        // empirical 1.18x safety factor.
+        const ctx2d = ctx as CanvasRenderingContext2D & { letterSpacing?: string };
+        const titleSpacingEm = 0.06;
+        ctx2d.letterSpacing = `${titleSpacingEm}em`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const maxTitleW = w * 0.84;
+        let titleSize = 72;
+        for (; titleSize >= 40; titleSize -= 2) {
+          ctx.font = `700 ${titleSize}px "Cormorant Garamond", "Times New Roman", serif`;
+          const wMeasured = ctx.measureText('MARBLES').width * 1.18 + titleSize * titleSpacingEm * 6;
+          if (wMeasured <= maxTitleW) break;
+        }
+        // Light edge below (debossed bottom-rim catches light from upper-left)
+        ctx.fillStyle = 'rgba(255, 240, 220, 0.07)';
+        ctx.fillText('MARBLES', titleX + 1, titleY + 1.5);
+        // Dark edge above (debossed shadow into the indent)
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+        ctx.fillText('MARBLES', titleX, titleY - 1.5);
+        // Main fill — slightly darker than bg so text reads as carved-in
+        ctx.fillStyle = '#0e0a06';
+        ctx.fillText('MARBLES', titleX, titleY);
+
+        // Sub-hint, only until the user has interacted
+        if (!hasTouchedRef.current) {
+          ctx.font = '300 10px "JetBrains Mono", ui-monospace, monospace';
+          ctx2d.letterSpacing = '0.32em';
+          const breath = 0.6 + Math.sin(performance.now() * 0.0022) * 0.25;
+          ctx.fillStyle = `rgba(150, 122, 90, ${breath})`;
+          ctx.fillText('TAP A COLOR · DROP · MERGE · SHAKE', titleX + 4, titleY + 56);
+        }
+        ctx.restore();
+      }
+
+      // Render pegs — order matters: shadows BEHIND the pit, flash ring ON TOP.
+      for (let pi = 0; pi < PEGS.length; pi++) {
+        const peg = PEGS[pi];
+        const px = (peg.xPct / 100) * w;
+        const py = (peg.yPct / 100) * h;
+        const flash = pegFlashRef.current[pi];
+
+        // 1) Long "nail" tail shadow — drawn FIRST so anything else covers it.
+        //    Wider + slightly tapered for a more legible "real shadow" feel.
+        const tailLen = 34;
+        const tailGrad = ctx.createLinearGradient(px, py + peg.r * 0.4, px, py + peg.r * 0.4 + tailLen);
+        tailGrad.addColorStop(0,    'rgba(0, 0, 0, 0.65)');
+        tailGrad.addColorStop(0.5,  'rgba(0, 0, 0, 0.28)');
+        tailGrad.addColorStop(1,    'rgba(0, 0, 0, 0)');
+        ctx.fillStyle = tailGrad;
+        // Soft-edged tail via two stacked rects of decreasing alpha
+        ctx.fillRect(px - 3,   py + peg.r * 0.4, 6, tailLen);          // wider, low alpha edges
+        ctx.globalAlpha = 0.6;
+        ctx.fillRect(px - 1.5, py + peg.r * 0.4, 3, tailLen * 0.95);   // sharper core
+        ctx.globalAlpha = 1;
+
+        // 2) Outer rim shadow ring — defines cavity edge against bg
+        ctx.beginPath();
+        ctx.arc(px, py, peg.r + 1.5, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+        ctx.fill();
+
+        // 3) Concave silver pit — gradient INVERTED from balls.
+        const lpx = px + peg.r * 0.38;
+        const lpy = py + peg.r * 0.42;
+        const pegGrad = ctx.createRadialGradient(lpx, lpy, 0, px, py, peg.r);
+        pegGrad.addColorStop(0,    '#D2D0CB');
+        pegGrad.addColorStop(0.5,  '#5C5A56');
+        pegGrad.addColorStop(0.88, '#1F1D17');
+        pegGrad.addColorStop(1,    '#15110C');
+        ctx.beginPath();
+        ctx.arc(px, py, peg.r, 0, Math.PI * 2);
+        ctx.fillStyle = pegGrad;
+        ctx.fill();
+
+        // 4) Upper-left rim crescent — inside lip in shadow
+        ctx.beginPath();
+        ctx.arc(px, py, peg.r - 0.5, 1.1 * Math.PI, 1.85 * Math.PI);
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.55)';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+
+        // 5) Flash ring — drawn LAST so it appears in front of the tail shadow
+        if (flash > 0) {
+          const ringR = peg.r + (1 - flash) * 20;
+          ctx.beginPath();
+          ctx.arc(px, py, ringR, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(232, 226, 210, ${flash * 0.7})`;
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+      }
+
+      // ── Top tray (holes + shake dome) — drawn here so balls render OVER them ─
+      const tray = trayLayout(w);
+      // Color sockets
+      for (const h of tray.holes) {
+        const r = HOLE_DIA / 2;
+        // Outer dark cavity
+        ctx.beginPath();
+        ctx.arc(h.cx, h.cy, r, 0, Math.PI * 2);
+        ctx.fillStyle = '#050300';
+        ctx.fill();
+        // Inset shadow on top of cavity (deeper at top, light catches on lower-right)
+        const innerShadow = ctx.createRadialGradient(h.cx, h.cy - r * 0.5, 0, h.cx, h.cy, r);
+        innerShadow.addColorStop(0,    'rgba(0, 0, 0, 0.95)');
+        innerShadow.addColorStop(0.7,  'rgba(0, 0, 0, 0.4)');
+        innerShadow.addColorStop(1,    'rgba(0, 0, 0, 0)');
+        ctx.beginPath();
+        ctx.arc(h.cx, h.cy, r - 1, 0, Math.PI * 2);
+        ctx.fillStyle = innerShadow;
+        ctx.fill();
+        // Inner colored cup — darker tint of the marble color, slightly recessed
+        const cupR = r * 0.62;
+        const cupDark = shadeHex(h.color, 0.55);
+        const cupGrad = ctx.createRadialGradient(h.cx, h.cy + cupR * 0.4, 0, h.cx, h.cy, cupR);
+        cupGrad.addColorStop(0,   cupDark);
+        cupGrad.addColorStop(0.7, shadeHex(h.color, 0.35));
+        cupGrad.addColorStop(1,   shadeHex(h.color, 0.2));
+        ctx.beginPath();
+        ctx.arc(h.cx, h.cy, cupR, 0, Math.PI * 2);
+        ctx.fillStyle = cupGrad;
+        ctx.fill();
+        // Bright top rim of the carved hole — catches light
+        ctx.beginPath();
+        ctx.arc(h.cx, h.cy + 0.5, r - 0.5, 1.05 * Math.PI, 1.95 * Math.PI);
+        ctx.strokeStyle = 'rgba(255, 240, 220, 0.12)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        // Remaining-budget countdown below the hole — always shown.
+        // When a count just decremented, briefly pulse it (scale + bright tint)
+        // and float a small "−1" tick upward, so the player feels the cost.
+        const remaining = colorCountsRef.current[h.color] ?? 0;
+        const lastChange = colorChangeRef.current[h.color] ?? 0;
+        const flashAge = performance.now() - lastChange;
+        const flash = lastChange > 0 ? Math.max(0, 1 - flashAge / 380) : 0;
+        const tx = h.cx;
+        const ty = h.cy + r + 11;
+        ctx.save();
+        const scale = 1 + flash * 0.55;
+        ctx.translate(tx, ty);
+        ctx.scale(scale, scale);
+        ctx.font = '500 11px "JetBrains Mono", ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        if (remaining <= 0) {
+          ctx.fillStyle = 'rgba(225, 110, 92, 0.95)';
+        } else if (flash > 0) {
+          // Lerp from base cream toward color-tinted bright cream
+          const base = [232, 212, 181];
+          const hi = [255, 240, 215];
+          const lerp = (a: number, b: number) => Math.round(a + (b - a) * flash);
+          const a = 0.66 + flash * 0.34;
+          ctx.fillStyle = `rgba(${lerp(base[0], hi[0])}, ${lerp(base[1], hi[1])}, ${lerp(base[2], hi[2])}, ${a})`;
+        } else {
+          ctx.fillStyle = 'rgba(232, 212, 181, 0.66)';
+        }
+        ctx.fillText(String(remaining), 0, 0);
+        ctx.restore();
+        // Floating "−1" tick that drifts up + fades
+        if (flash > 0 && remaining > 0) {
+          ctx.save();
+          ctx.font = '600 9px "JetBrains Mono", ui-monospace, monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          const drift = (1 - flash) * 14;
+          ctx.fillStyle = `rgba(${parseInt(h.color.slice(1, 3), 16)}, ${parseInt(h.color.slice(3, 5), 16)}, ${parseInt(h.color.slice(5, 7), 16)}, ${flash * 0.85})`;
+          ctx.fillText('−1', tx, ty - 10 - drift);
+          ctx.restore();
+        }
+      }
+
+      // Shake dome — raised brass button with up-triangle icon
+      {
+        const cx = tray.shakeCx;
+        const cy = tray.shakeCy;
+        const r = HOLE_DIA / 2;
+        // Drop shadow under the dome
+        ctx.beginPath();
+        ctx.ellipse(cx, cy + r * 0.65, r * 0.92, r * 0.32, 0, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+        ctx.fill();
+        // Brass body — convex (light from upper-left)
+        const lpx = cx - r * 0.32;
+        const lpy = cy - r * 0.42;
+        const domeGrad = ctx.createRadialGradient(lpx, lpy, 0, cx, cy, r);
+        domeGrad.addColorStop(0,    '#F2D696');
+        domeGrad.addColorStop(0.45, '#B89148');
+        domeGrad.addColorStop(1,    '#5C4416');
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.fillStyle = domeGrad;
+        ctx.fill();
+        // Hairline rim
+        ctx.beginPath();
+        ctx.arc(cx, cy, r - 0.5, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.45)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        // Up-arrow icon — chunky shaft + arrowhead, ink-stamp feel.
+        const inkColor = 'rgba(70, 44, 10, 0.95)';
+        ctx.fillStyle = inkColor;
+        ctx.strokeStyle = inkColor;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        // Shaft — vertical line, drawn as a thick stroke for rounded ends
+        ctx.beginPath();
+        ctx.moveTo(cx, cy - 4);
+        ctx.lineTo(cx, cy + 9);
+        ctx.lineWidth = 5;
+        ctx.stroke();
+        // Arrowhead — chevron at top, also stroked round
+        ctx.beginPath();
+        ctx.moveTo(cx - 8, cy - 1);
+        ctx.lineTo(cx, cy - 11);
+        ctx.lineTo(cx + 8, cy - 1);
+        ctx.lineWidth = 5;
+        ctx.stroke();
+      }
+
       // Sort balls by y so closer-to-bottom render on top (depth illusion)
       const sorted = [...ballsRef.current].sort((p, q) => p.y - q.y);
 
       for (const b of sorted) {
         const alpha = b.fading >= 1 ? 1 : Math.max(0, b.fading);
+
+        // Born-glow halo for freshly merged balls — soft outer ring
+        if (b.bornGlow > 0) {
+          const glowR = b.r + b.bornGlow * 18;
+          const glowGrad = ctx.createRadialGradient(b.x, b.y, b.r, b.x, b.y, glowR);
+          glowGrad.addColorStop(0, `rgba(255, 240, 210, ${0.5 * b.bornGlow})`);
+          glowGrad.addColorStop(1, 'rgba(255, 240, 210, 0)');
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, glowR, 0, Math.PI * 2);
+          ctx.fillStyle = glowGrad;
+          ctx.fill();
+        }
 
         // Cast shadow on the floor — relative to ball position + virtual light
         const shadowY = h - 4;
@@ -279,6 +806,77 @@ export default function Marbles() {
         ctx.globalAlpha = 1;
       }
 
+      // Burst particles — small dots that spray outward when a ball pops
+      for (const p of burstsRef.current) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r * p.life, 0, Math.PI * 2);
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = p.life;
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+
+      // Springboard flash at the bottom (shake feedback) — quadratic arc
+      const sf = shakeFlashRef.current;
+      if (sf > 0) {
+        const arc = Math.sin(sf * Math.PI) * 22;
+        const baseY = h - 6;
+        ctx.beginPath();
+        ctx.moveTo(0, baseY);
+        ctx.quadraticCurveTo(w / 2, baseY - arc, w, baseY);
+        const grad = ctx.createLinearGradient(0, baseY - arc, 0, baseY + 4);
+        grad.addColorStop(0, `rgba(232, 200, 130, ${sf * 0.85})`);
+        grad.addColorStop(1, `rgba(120, 80, 40, ${sf * 0.4})`);
+        ctx.strokeStyle = grad;
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+        // Glow
+        ctx.beginPath();
+        ctx.moveTo(0, baseY);
+        ctx.quadraticCurveTo(w / 2, baseY - arc, w, baseY);
+        ctx.strokeStyle = `rgba(255, 220, 160, ${sf * 0.18})`;
+        ctx.lineWidth = 8;
+        ctx.stroke();
+        shakeFlashRef.current = Math.max(0, sf - 0.045);
+      }
+
+      // Combo flourish — "×N" floats up + fades from the burst origin.
+      const cf = comboFlashRef.current;
+      if (cf) {
+        const age = performance.now() - cf.t;
+        const dur = 1100;
+        if (age >= dur) {
+          comboFlashRef.current = null;
+        } else {
+          const k = age / dur;
+          const drift = k * 38;
+          const alpha = (1 - k) * (1 - k);
+          ctx.save();
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          // "COMBO" label
+          ctx.font = '600 11px "JetBrains Mono", ui-monospace, monospace';
+          const ctxL = ctx as CanvasRenderingContext2D & { letterSpacing?: string };
+          ctxL.letterSpacing = '0.32em';
+          ctx.fillStyle = `rgba(232, 212, 181, ${alpha * 0.9})`;
+          ctx.fillText('COMBO', cf.x + 4, cf.y - 28 - drift);
+          // "×N" big
+          ctxL.letterSpacing = '0em';
+          ctx.font = `700 ${28 + cf.n * 2}px "Cormorant Garamond", serif`;
+          ctx.fillStyle = `rgba(255, 230, 190, ${alpha})`;
+          ctx.fillText('×' + cf.n, cf.x, cf.y - 8 - drift);
+          // Soft glow halo
+          ctx.beginPath();
+          ctx.arc(cf.x, cf.y - 14 - drift, 50 + cf.n * 4, 0, Math.PI * 2);
+          const halo = ctx.createRadialGradient(cf.x, cf.y - 14 - drift, 0, cf.x, cf.y - 14 - drift, 50 + cf.n * 4);
+          halo.addColorStop(0, `rgba(255, 220, 160, ${alpha * 0.18})`);
+          halo.addColorStop(1, 'rgba(255, 220, 160, 0)');
+          ctx.fillStyle = halo;
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
@@ -289,6 +887,7 @@ export default function Marbles() {
   const spawnAt = (px: number, py: number) => {
     const r = MIN_R + Math.random() * (MAX_R - MIN_R);
     const ball: Ball = {
+      id: ++ballIdRef.current,
       x: px, y: py,
       vx: (Math.random() - 0.5) * 1.4,
       vy: (Math.random() - 0.5) * 0.6,
@@ -296,6 +895,7 @@ export default function Marbles() {
       color: pickColor(),
       born: performance.now(),
       fading: 1,
+      bornGlow: 0,
     };
     const list = ballsRef.current;
     if (list.length >= MAX_BALLS) {
@@ -303,8 +903,139 @@ export default function Marbles() {
       for (const b of list) { if (b.fading >= 1) { b.fading = 0.99; break; } }
     }
     list.push(ball);
-    setCount(list.length);
-    if (!hasTouched) setHasTouched(true);
+    if (!hasTouched) { setHasTouched(true); hasTouchedRef.current = true; }
+  };
+
+  // Same as spawnAt but doesn't toggle hasTouched — used by attract mode
+  const spawnAtAttract = (px: number, py: number) => {
+    const r = MIN_R + Math.random() * (MAX_R - MIN_R);
+    const ball: Ball = {
+      id: ++ballIdRef.current,
+      x: px, y: py,
+      vx: (Math.random() - 0.5) * 0.8,
+      vy: 0,
+      r,
+      color: pickColor(),
+      born: performance.now(),
+      fading: 1,
+      bornGlow: 0,
+    };
+    const list = ballsRef.current;
+    if (list.length >= MAX_BALLS) {
+      for (const b of list) { if (b.fading >= 1) { b.fading = 0.99; break; } }
+    }
+    list.push(ball);
+  };
+
+  // Spawn a burst of particles at a position when a merged ball pops.
+  // Particle count + speed scales with the source ball's radius for dramatic
+  // scatters when a long-merged giant finally pops.
+  const spawnBurst = (x: number, y: number, color: string, baseR: number) => {
+    const n = Math.floor(18 + baseR * 0.7 + Math.random() * 6);
+    const baseSpeed = 4 + baseR * 0.06;
+    for (let i = 0; i < n; i++) {
+      const angle = (Math.PI * 2 * i) / n + Math.random() * 0.5;
+      const speed = baseSpeed + Math.random() * (3 + baseR * 0.05);
+      burstsRef.current.push({
+        x, y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed - 1.4,
+        r: 2 + Math.random() * (baseR * 0.18),
+        color,
+        life: 1,
+      });
+    }
+  };
+
+  // Springboard shake — bounces all balls up to scramble the pile
+  const shakeFlashRef = useRef(0);
+  const lastShakeRef = useRef(0);
+  const shakeAll = () => {
+    if (gameOverRef.current) return;
+    const now = performance.now();
+    if (now - lastShakeRef.current < 280) return;   // rate-limit rapid taps
+    lastShakeRef.current = now;
+    ensureAudio();
+    stopAttract();
+    if (!hasTouched) { setHasTouched(true); hasTouchedRef.current = true; }
+    for (const b of ballsRef.current) {
+      if (b.fading < 1) continue;
+      // Strong upward impulse + sideways scatter, scaled mildly with size.
+      const sizeFactor = 1 + (b.r - MIN_R) / (MAX_R - MIN_R) * 0.25;
+      b.vy = (-11 - Math.random() * 7) * sizeFactor;
+      b.vx += (Math.random() - 0.5) * 7;
+    }
+    // Cost: shaking consumes one ball from every color's stock. If any color
+    // would drop below zero, the run ends immediately (still a valid shake).
+    let depleted = false;
+    const t = performance.now();
+    for (const c of PALETTE) {
+      const next = (colorCountsRef.current[c.hex] ?? 0) - 1;
+      colorCountsRef.current[c.hex] = next;
+      colorChangeRef.current[c.hex] = t;
+      if (next <= 0) depleted = true;
+    }
+    if (depleted) {
+      gameOverRef.current = true;
+      setGameOver(true);
+    }
+    shakeFlashRef.current = 1;
+    playThud();
+  };
+
+  // Wipe everything for a fresh run.
+  const resetGame = () => {
+    for (const c of PALETTE) {
+      colorCountsRef.current[c.hex] = STARTING_BUDGET;
+      colorChangeRef.current[c.hex] = 0;
+    }
+    burstScoreRef.current = 0;
+    setScoreDisplay(0);
+    ballsRef.current = [];
+    burstsRef.current = [];
+    lastBurstRef.current = 0;
+    comboRef.current = 0;
+    comboFlashRef.current = null;
+    gameOverRef.current = false;
+    setGameOver(false);
+    setHasTouched(false);
+    hasTouchedRef.current = false;
+  };
+
+  // Drop a single free ball at a given x, with a forced color, no stock cost.
+  // Used by the combo "rainbow rain" reward.
+  const dropFreeBall = (color: string, forcedX?: number) => {
+    if (gameOverRef.current) return;
+    const w = sizeRef.current.w || 390;
+    const margin = HOLE_DIA;
+    const x = forcedX !== undefined
+      ? Math.max(margin, Math.min(w - margin, forcedX))
+      : margin + Math.random() * (w - margin * 2);
+    const r = MIN_R + Math.random() * (MAX_R - MIN_R);
+    const ball: Ball = {
+      id: ++ballIdRef.current,
+      x, y: -10,
+      vx: (Math.random() - 0.5) * 1.2,
+      vy: 0,
+      r,
+      color,
+      born: performance.now(),
+      fading: 1,
+      bornGlow: 1,
+    };
+    const list = ballsRef.current;
+    if (list.length >= MAX_BALLS) {
+      for (const b of list) { if (b.fading >= 1) { b.fading = 0.99; break; } }
+    }
+    list.push(ball);
+  };
+
+  // Stop attract mode permanently once user has interacted
+  const stopAttract = () => {
+    if (attractRef.current) {
+      clearInterval(attractRef.current);
+      attractRef.current = null;
+    }
   };
 
   const clearAll = () => {
@@ -313,35 +1044,69 @@ export default function Marbles() {
     }
   };
 
-  const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+  // Pick a random color that still has stock (used by canvas-anywhere taps).
+  const pickAvailableColor = (): string | null => {
+    const available = PALETTE.filter(c => (colorCountsRef.current[c.hex] ?? 0) > 0);
+    if (available.length === 0) return null;
+    return available[Math.floor(Math.random() * available.length)].hex;
+  };
+
+  // Drop a ball from above the canvas at a given X (always from y=-10).
+  // Decrements the chosen color's stock. Once any color reaches 0 → game over.
+  const dropFromTop = (x: number, color?: string) => {
+    if (gameOverRef.current) return;
+    ensureAudio();
+    stopAttract();
+    const finalColor = color ?? pickAvailableColor();
+    if (!finalColor) return;                      // every color exhausted
+    if ((colorCountsRef.current[finalColor] ?? 0) <= 0) return;   // this color out
+
+    const r = MIN_R + Math.random() * (MAX_R - MIN_R);
+    const ball: Ball = {
+      id: ++ballIdRef.current,
+      x, y: -10,
+      vx: 0, vy: 0,
+      r,
+      color: finalColor,
+      born: performance.now(),
+      fading: 1,
+      bornGlow: 0,
+    };
+    const list = ballsRef.current;
+    if (list.length >= MAX_BALLS) {
+      for (const b of list) { if (b.fading >= 1) { b.fading = 0.99; break; } }
+    }
+    list.push(ball);
+    colorCountsRef.current[finalColor] = (colorCountsRef.current[finalColor] ?? 0) - 1;
+    colorChangeRef.current[finalColor] = performance.now();
+    if (!hasTouched) { setHasTouched(true); hasTouchedRef.current = true; }
+    // First color to hit zero ends the run.
+    if (colorCountsRef.current[finalColor] === 0) {
+      gameOverRef.current = true;
+      setGameOver(true);
+    }
+  };
+
+  // Tap on canvas → drop a random-color ball from the top at the touched X
+  const onCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
+    const x = e.clientX - rect.left;
     longPressFiredRef.current = false;
     longPressRef.current = setTimeout(() => {
       longPressFiredRef.current = true;
       clearAll();
     }, 700);
-    // Spawn immediately on tap-down for responsiveness
-    const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
-    spawnAt(e.clientX - rect.left, e.clientY - rect.top);
+    dropFromTop(x);
   };
-  const onPointerUp = () => {
+  const onCanvasPointerUp = () => {
     if (longPressRef.current) clearTimeout(longPressRef.current);
   };
-  const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    // dragging continuously spawns sparingly (every ~9 px)
-    if (e.buttons === 0) return;
-    const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const last = lastDragRef.current;
-    if (last) {
-      const dx = x - last.x, dy = y - last.y;
-      if (dx * dx + dy * dy < 64) return;
-    }
-    lastDragRef.current = { x, y };
-    if (longPressRef.current) { clearTimeout(longPressRef.current); longPressRef.current = null; }
-    spawnAt(x, y);
+
+  // Tap on a swatch in the tray → drop that color from the swatch's center X
+  const onSwatchPress = (color: string, e: React.PointerEvent<HTMLButtonElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    dropFromTop(rect.left + rect.width / 2, color);
   };
-  const lastDragRef = useRef<{ x: number; y: number } | null>(null);
 
   const isPoster = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('poster') === '1';
 
@@ -350,10 +1115,9 @@ export default function Marbles() {
       <canvas
         ref={canvasRef}
         className="mb__canvas"
-        onPointerDown={onPointerDown}
-        onPointerUp={onPointerUp}
-        onPointerMove={onPointerMove}
-        onPointerCancel={onPointerUp}
+        onPointerDown={onCanvasPointerDown}
+        onPointerUp={onCanvasPointerUp}
+        onPointerCancel={onCanvasPointerUp}
       />
       {isPoster ? (
         <>
@@ -362,9 +1126,41 @@ export default function Marbles() {
         </>
       ) : (
         <>
-          {!hasTouched && <div className="mb__hint">tap</div>}
-          <div className="mb__counter">{count.toString().padStart(4, '0')}</div>
-          <div className="mb__brand">heirloom marbles</div>
+          <div className="mb__tray" aria-label="color tray">
+            {PALETTE.map(c => (
+              <button
+                key={c.hex}
+                type="button"
+                className="mb__hole"
+                onPointerDown={e => onSwatchPress(c.hex, e)}
+                aria-label={`drop ${c.hex}`}
+              />
+            ))}
+            <span className="mb__tray-divider" />
+            <button
+              type="button"
+              className="mb__shake"
+              onPointerDown={shakeAll}
+              aria-label="shake to shuffle"
+            />
+          </div>
+          <div className="mb__score">
+            <span className="mb__score-label">score</span>
+            <span className="mb__score-value">{(scoreDisplay * 100).toString().padStart(5, '0')}</span>
+          </div>
+          <div className="mb__brand">heirloom edition</div>
+          {gameOver && (
+            <div className="mb__game-over">
+              <div className="mb__game-over__panel">
+                <div className="mb__game-over__label">round complete</div>
+                <div className="mb__game-over__score">{(scoreDisplay * 100).toString()}</div>
+                <div className="mb__game-over__sub">{scoreDisplay} bursts × 100</div>
+                <button className="mb__game-over__btn" onPointerDown={resetGame}>
+                  play again
+                </button>
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>

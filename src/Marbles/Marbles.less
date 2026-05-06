@@ -21,37 +21,149 @@
   cursor: pointer;
 }
 
-.mb__hint {
+// The tray VISUAL is rendered on the canvas (so balls render on top of it).
+// The DOM here is just transparent click-targets aligned over the canvas-drawn
+// holes/shake dome. Pointer-events on container is none; only the buttons
+// themselves capture taps so the rest of the canvas still receives "tap
+// anywhere" drops that fall through.
+.mb__tray {
   position: absolute;
+  top: 18px;
   left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  font-style: italic;
-  font-weight: 300;
-  font-size: 18px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+  z-index: 10;
+}
+.mb__tray-divider {
+  display: block;
+  width: 4px;
+  height: 1px;
+}
+
+.mb__hole,
+.mb__shake {
+  appearance: none;
+  border: none;
+  padding: 0;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+  pointer-events: auto;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: none;
+  // No visual — the canvas draws the hole/dome behind. We just sit here as a
+  // hit target. A tiny pressed feedback so users feel the tap.
+  &:active { transform: translateY(1px); }
+}
+
+// (no .mb__hole-cup needed — drawn on canvas)
+
+// Title and sub-hint are drawn on the canvas (debossed effect), not here —
+// nothing CSS-side, since DOM can't sit between two canvas layers.
+
+// Score readout, bottom-right
+.mb__score {
+  position: absolute;
+  bottom: 18px;
+  right: 22px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  pointer-events: none;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-feature-settings: "tnum" 1;
+}
+.mb__score-label {
+  font-size: 9px;
   letter-spacing: 0.32em;
   color: rgba(232, 212, 181, 0.4);
-  pointer-events: none;
-  animation: mb-hint-breath 3.4s ease-in-out infinite;
-  text-transform: lowercase;
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+.mb__score-value {
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  color: rgba(232, 212, 181, 0.85);
 }
 
-@keyframes mb-hint-breath {
-  0%, 100% { opacity: 0.32; transform: translate(-50%, -50%) scale(1); }
-  50%      { opacity: 0.72; transform: translate(-50%, -50%) scale(1.04); }
-}
-
-.mb__counter {
+// Game-over overlay
+.mb__game-over {
   position: absolute;
-  bottom: 22px;
-  right: 22px;
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 300;
+  inset: 0;
+  background: rgba(8, 6, 4, 0.78);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 30;
+  animation: mb-go-fade 0.4s ease;
+}
+@keyframes mb-go-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.mb__game-over__panel {
+  text-align: center;
+  padding: 36px 44px 30px;
+  background: rgba(28, 22, 16, 0.85);
+  border: 1px solid rgba(232, 212, 181, 0.12);
+  border-radius: 18px;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.6);
+}
+
+.mb__game-over__label {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.4em;
+  color: rgba(232, 212, 181, 0.5);
+  text-transform: uppercase;
+  margin-bottom: 14px;
+}
+
+.mb__game-over__score {
+  font-family: 'Cormorant Garamond', serif;
+  font-weight: 700;
+  font-size: 64px;
+  color: rgba(232, 212, 181, 0.95);
+  letter-spacing: 0.04em;
+  line-height: 1;
+  margin-bottom: 6px;
+}
+
+.mb__game-over__sub {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
   font-size: 11px;
-  color: rgba(232, 212, 181, 0.32);
-  letter-spacing: 0.18em;
-  pointer-events: none;
-  font-feature-settings: "tnum" 1;
+  letter-spacing: 0.2em;
+  color: rgba(232, 212, 181, 0.45);
+  margin-bottom: 22px;
+}
+
+.mb__game-over__btn {
+  appearance: none;
+  border: 1px solid rgba(232, 212, 181, 0.4);
+  background: transparent;
+  color: rgba(232, 212, 181, 0.92);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  letter-spacing: 0.24em;
+  padding: 10px 24px;
+  border-radius: 999px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  text-transform: uppercase;
+  transition: background 0.15s ease, transform 0.08s ease;
+  &:active {
+    background: rgba(232, 212, 181, 0.08);
+    transform: translateY(1px);
+  }
 }
 
 // Poster mode: prominent title centered at top, lots of negative space.
