@@ -210,3 +210,64 @@
   pointer-events: none;
   text-transform: lowercase;
 }
+
+// Surfaced when sensor events failed to arrive after first user gesture.
+// Tap re-runs requestPermission(); harmless on devices that don't have
+// sensors (button just stays visible — gameplay still works without tilt).
+.mb__motion-prompt {
+  appearance: none;
+  position: absolute;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px 8px 14px;
+  border: 1px solid rgba(232, 212, 181, 0.35);
+  border-radius: 999px;
+  background: rgba(28, 22, 16, 0.7);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  color: rgba(232, 212, 181, 0.85);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  z-index: 12;
+  animation: mb-motion-pulse 2.4s ease-in-out infinite;
+  &:active {
+    background: rgba(232, 212, 181, 0.12);
+    transform: translateX(-50%) translateY(1px);
+  }
+}
+.mb__motion-prompt__icon {
+  font-size: 14px;
+  line-height: 1;
+  color: rgba(232, 212, 181, 0.75);
+  transform: translateY(-1px);
+}
+@keyframes mb-motion-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(232, 212, 181, 0.18); }
+  50%      { box-shadow: 0 0 0 6px rgba(232, 212, 181, 0); }
+}
+
+// Live sensor diagnostics — only shown when ?debug=1 is in the URL.
+.mb__debug {
+  position: absolute;
+  top: 88px;
+  left: 12px;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(232, 212, 181, 0.18);
+  border-radius: 6px;
+  color: rgba(232, 212, 181, 0.82);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 9px;
+  line-height: 1.5;
+  letter-spacing: 0.06em;
+  pointer-events: none;
+  z-index: 11;
+}

@@ -269,11 +269,34 @@ export default function Marbles() {
     return () => window.removeEventListener('resize', resize);
   }, []);
 
+  // Sensor diagnostics — flipped to true the first time an event actually
+  // reaches us. If still false 1.5s after first user gesture, we surface a
+  // visible "ENABLE TILT & SHAKE" button so the player can retry the iOS
+  // permission prompt (or know that sensors are unavailable on their device).
+  const orientReceivedRef = useRef(false);
+  const motionReceivedRef = useRef(false);
+  const [motionStatus, setMotionStatus] = useState<'idle' | 'pending' | 'on' | 'off'>('idle');
+  const motionStatusRef = useRef<typeof motionStatus>('idle');
+  motionStatusRef.current = motionStatus;
+  const debugMotion = typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).get('debug') === '1';
+  const debugRef = useRef({ beta: 0, gamma: 0, mag: 0 });
+  // Force-rerender ~5x/sec when debug overlay is on so live values refresh.
+  const [, setDebugTick] = useState(0);
+  useEffect(() => {
+    if (!debugMotion) return;
+    const id = setInterval(() => setDebugTick(t => t + 1), 200);
+    return () => clearInterval(id);
+  }, [debugMotion]);
+
   // Tilt → gravity vector (DeviceOrientation). Smoothly lerped.
   // On iOS 13+ the listener is silent until requestPermission() resolves
   // 'granted' inside a user gesture — see requestMotionPerms() below.
   useEffect(() => {
     function onOrient(e: DeviceOrientationEvent) {
+      if (e.beta == null && e.gamma == null) return;
+      orientReceivedRef.current = true;
+      if (motionStatusRef.current !== 'on') setMotionStatus('on');
       // gamma: -90..90 left/right, beta: -180..180 forward/back
       const gx = Math.max(-1, Math.min(1, (e.gamma ?? 0) / 45));
       const gy = Math.max(-1, Math.min(1, (e.beta ?? 0) / 45));
@@ -282,10 +305,14 @@ export default function Marbles() {
       // lerp gravity for smoothness
       gravityRef.current.gx += (targetX - gravityRef.current.gx) * 0.06;
       gravityRef.current.gy += (targetY - gravityRef.current.gy) * 0.06;
+      if (debugMotion) {
+        debugRef.current.beta = e.beta ?? 0;
+        debugRef.current.gamma = e.gamma ?? 0;
+      }
     }
     window.addEventListener('deviceorientation', onOrient);
     return () => window.removeEventListener('deviceorientation', onOrient);
-  }, []);
+  }, [debugMotion]);
 
   // Shake-to-spring: detect a sharp acceleration spike and trigger shakeAll().
   // We track shakeAll via a ref so the listener (set up once) always sees the
@@ -294,35 +321,76 @@ export default function Marbles() {
   useEffect(() => {
     let lastFire = 0;
     function onMotion(e: DeviceMotionEvent) {
+      motionReceivedRef.current = true;
       const accel = e.acceleration && e.acceleration.x !== null ? e.acceleration : null;
       const a = accel ?? e.accelerationIncludingGravity;
       if (!a) return;
       const ax = a.x ?? 0, ay = a.y ?? 0, az = a.z ?? 0;
       const mag = Math.sqrt(ax * ax + ay * ay + az * az);
       // `acceleration` rest ≈ 0; `accelerationIncludingGravity` rest ≈ 9.8.
-      const threshold = accel ? 16 : 24;
+      // Subtract baseline so the threshold means "above-rest jolt" either way.
+      const baseline = accel ? 0 : 9.8;
+      const jolt = Math.abs(mag - baseline);
+      if (debugMotion) debugRef.current.mag = jolt;
+      const threshold = 14;
       const now = performance.now();
-      if (mag > threshold && now - lastFire > 600) {
+      if (jolt > threshold && now - lastFire > 600) {
         lastFire = now;
         shakeAllRef.current();
       }
     }
     window.addEventListener('devicemotion', onMotion);
     return () => window.removeEventListener('devicemotion', onMotion);
-  }, []);
+  }, [debugMotion]);
 
-  // iOS 13+ gates motion / orientation behind a per-session permission
-  // prompt that MUST be triggered by a user gesture. Fire-and-forget on the
-  // first tap; gracefully no-ops on browsers without the requestPermission.
-  const motionPermsRef = useRef(false);
-  const requestMotionPerms = () => {
-    if (motionPermsRef.current) return;
-    motionPermsRef.current = true;
+  // iOS 13+ gates motion / orientation behind a per-session permission prompt
+  // that MUST be triggered by a user gesture. We:
+  //   1. Detect whether requestPermission exists (iOS Safari only)
+  //   2. Call it inside the gesture, await result, log + setState
+  //   3. After granting (or on non-iOS browsers), schedule a 1.5s probe — if
+  //      no orientation events arrived, mark status as 'off' so the UI can
+  //      surface a retry button.
+  // The function is idempotent except when it has previously failed: in that
+  // case a subsequent user gesture (e.g. tapping the "ENABLE" pill) retries.
+  const motionPermsRef = useRef<'idle' | 'pending' | 'done'>('idle');
+  const requestMotionPerms = async () => {
+    if (motionPermsRef.current === 'pending') return;
+    if (motionPermsRef.current === 'done') return;
+    motionPermsRef.current = 'pending';
+    setMotionStatus('pending');
+
     type Reqable = { requestPermission?: () => Promise<'granted' | 'denied' | 'default'> };
-    const o = (DeviceOrientationEvent as unknown as Reqable);
-    const m = (DeviceMotionEvent as unknown as Reqable);
-    try { void o.requestPermission?.().catch(() => {}); } catch { /* not supported */ }
-    try { void m.requestPermission?.().catch(() => {}); } catch { /* not supported */ }
+    const O = DeviceOrientationEvent as unknown as Reqable;
+    const M = DeviceMotionEvent as unknown as Reqable;
+    const hasReqPerm = typeof O?.requestPermission === 'function' || typeof M?.requestPermission === 'function';
+
+    let oState: string = 'n/a';
+    let mState: string = 'n/a';
+    try {
+      if (typeof O.requestPermission === 'function') oState = await O.requestPermission();
+    } catch (err) {
+      oState = 'error: ' + (err instanceof Error ? err.message : String(err));
+    }
+    try {
+      if (typeof M.requestPermission === 'function') mState = await M.requestPermission();
+    } catch (err) {
+      mState = 'error: ' + (err instanceof Error ? err.message : String(err));
+    }
+    // eslint-disable-next-line no-console
+    console.info('[marbles] motion perm — orient:', oState, ' motion:', mState, ' hasReqPerm:', hasReqPerm);
+    motionPermsRef.current = 'done';
+
+    // Probe: did events actually start flowing? (works on Android too — the
+    // probe just confirms sensors are alive.)
+    setTimeout(() => {
+      if (orientReceivedRef.current || motionReceivedRef.current) {
+        setMotionStatus('on');
+      } else {
+        setMotionStatus('off');
+        // Allow the explicit "ENABLE" pill to retry.
+        motionPermsRef.current = 'idle';
+      }
+    }, 1500);
   };
 
   // Main RAF loop
@@ -1193,6 +1261,25 @@ export default function Marbles() {
             <span className="mb__score-value">{(scoreDisplay * 100).toString().padStart(5, '0')}</span>
           </div>
           <div className="mb__brand">heirloom edition</div>
+          {motionStatus === 'off' && (
+            <button
+              type="button"
+              className="mb__motion-prompt"
+              onPointerDown={() => { void requestMotionPerms(); }}
+            >
+              <span className="mb__motion-prompt__icon">⤲</span>
+              <span className="mb__motion-prompt__label">enable tilt &amp; shake</span>
+            </button>
+          )}
+          {debugMotion && (
+            <div className="mb__debug">
+              <div>status: {motionStatus}</div>
+              <div>orient: {orientReceivedRef.current ? 'on' : 'off'}</div>
+              <div>motion: {motionReceivedRef.current ? 'on' : 'off'}</div>
+              <div>β:{Math.round(debugRef.current.beta)}° γ:{Math.round(debugRef.current.gamma)}°</div>
+              <div>jolt:{debugRef.current.mag.toFixed(1)}</div>
+            </div>
+          )}
           {gameOver && (
             <div className="mb__game-over">
               <div className="mb__game-over__panel">
