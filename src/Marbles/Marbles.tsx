@@ -278,6 +278,8 @@ export default function Marbles() {
   const [motionStatus, setMotionStatus] = useState<'idle' | 'pending' | 'on' | 'off'>('idle');
   const motionStatusRef = useRef<typeof motionStatus>('idle');
   motionStatusRef.current = motionStatus;
+  // Track the most recent permission result so the debug overlay can show it
+  const [lastPermResult, setLastPermResult] = useState<string>('—');
   const debugMotion = typeof window !== 'undefined' &&
     new URLSearchParams(window.location.search).get('debug') === '1';
   const debugRef = useRef({ beta: 0, gamma: 0, mag: 0 });
@@ -389,7 +391,8 @@ export default function Marbles() {
       mState = 'error: ' + (err instanceof Error ? err.message : String(err));
     }
     // eslint-disable-next-line no-console
-    console.info('[marbles] motion perm — orient:', oState, ' motion:', mState, ' hasReqPerm:', hasReqPerm);
+    console.info('[marbles] motion perm — orient:', oState, ' motion:', mState, ' hasReqPerm:', hasReqPerm, ' embedded:', isEmbeddedContext);
+    setLastPermResult(`o=${oState} m=${mState} req=${hasReqPerm} emb=${isEmbeddedContext}`);
     motionPermsRef.current = 'done';
 
     // Probe: did events actually start flowing? (works on Android too — the
@@ -1286,10 +1289,12 @@ export default function Marbles() {
           {debugMotion && (
             <div className="mb__debug">
               <div>status: {motionStatus}</div>
-              <div>orient: {orientReceivedRef.current ? 'on' : 'off'}</div>
-              <div>motion: {motionReceivedRef.current ? 'on' : 'off'}</div>
+              <div>orient evts: {orientReceivedRef.current ? 'yes' : 'no'}</div>
+              <div>motion evts: {motionReceivedRef.current ? 'yes' : 'no'}</div>
               <div>β:{Math.round(debugRef.current.beta)}° γ:{Math.round(debugRef.current.gamma)}°</div>
               <div>jolt:{debugRef.current.mag.toFixed(1)}</div>
+              <div>embed: {isEmbeddedContext ? 'yes' : 'no'}</div>
+              <div>perm: {lastPermResult}</div>
             </div>
           )}
           {gameOver && (
