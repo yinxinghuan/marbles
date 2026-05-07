@@ -128,8 +128,11 @@ export default function Marbles() {
   const [scoreDisplay, setScoreDisplay] = useState(0);
   const [gameOver, setGameOver] = useState(false);
   const gameOverRef = useRef(false);
-  // Attract mode auto-spawn interval
-  const attractRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Attract mode pending timers. Bounded — we drop one ball per palette color
+  // (6 total) and then stop. Bounded because the games list preloads us in
+  // the background; an unbounded drip would fill the screen if the user
+  // lingers on the previous game. See `feedback_game_preload_idle.md`.
+  const attractRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const [hasTouched, setHasTouched] = useState(false);
   const hasTouchedRef = useRef(false);   // mirror of hasTouched, readable from tick
 
@@ -200,31 +203,33 @@ export default function Marbles() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Attract mode — drop a few demo balls on mount, then keep spawning
-  // one every ~2.6s until the user touches. Stops on first interaction.
+  // Attract mode — drop exactly one ball per color (6 total), then idle.
+  // Bounded so the screen doesn't fill up if the games-list preloader
+  // mounts us minutes before the user actually swipes here.
   useEffect(() => {
     if (parseInt(new URLSearchParams(window.location.search).get('seed') ?? '0', 10)) return;
     if (new URLSearchParams(window.location.search).get('poster') === '1') return;
-    let cancelled = false;
-    // Initial cascade: 4 balls staggered over the first 2 seconds
-    const initialTimers: ReturnType<typeof setTimeout>[] = [];
-    for (let i = 0; i < 4; i++) {
-      initialTimers.push(setTimeout(() => {
-        if (cancelled) return;
-        const w = window.innerWidth;
-        spawnAtAttract(60 + Math.random() * (w - 120), -20);
-      }, 350 + i * 480));
+
+    // Shuffle the palette so the cascade order varies between sessions.
+    const colors = PALETTE.map(c => c.hex);
+    for (let i = colors.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [colors[i], colors[j]] = [colors[j], colors[i]];
     }
-    // Steady drip after that
-    attractRef.current = setInterval(() => {
-      if (cancelled) return;
-      const w = window.innerWidth;
-      spawnAtAttract(60 + Math.random() * (w - 120), -20);
-    }, 2800);
+
+    // Cadence: tight at the start (catch the eye), loosening toward the end
+    // so it settles into "calm" before the user touches.
+    const DELAYS = [350, 850, 1450, 2400, 3900, 6000];
+    attractRef.current = colors.map((color, i) =>
+      setTimeout(() => {
+        const w = window.innerWidth;
+        spawnAtAttract(60 + Math.random() * (w - 120), -20, color);
+      }, DELAYS[i])
+    );
+
     return () => {
-      cancelled = true;
-      initialTimers.forEach(clearTimeout);
-      if (attractRef.current) clearInterval(attractRef.current);
+      attractRef.current.forEach(clearTimeout);
+      attractRef.current = [];
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1043,8 +1048,10 @@ export default function Marbles() {
     if (!hasTouched) { setHasTouched(true); hasTouchedRef.current = true; }
   };
 
-  // Same as spawnAt but doesn't toggle hasTouched — used by attract mode
-  const spawnAtAttract = (px: number, py: number) => {
+  // Same as spawnAt but doesn't toggle hasTouched — used by attract mode.
+  // Color is forced (one ball per palette color) so the cascade always
+  // shows all six colors instead of repeating.
+  const spawnAtAttract = (px: number, py: number, color: string) => {
     const r = MIN_R + Math.random() * (MAX_R - MIN_R);
     const ball: Ball = {
       id: ++ballIdRef.current,
@@ -1052,7 +1059,7 @@ export default function Marbles() {
       vx: (Math.random() - 0.5) * 0.8,
       vy: 0,
       r,
-      color: pickColor(),
+      color,
       born: performance.now(),
       fading: 1,
       bornGlow: 0,
@@ -1169,11 +1176,12 @@ export default function Marbles() {
     list.push(ball);
   };
 
-  // Stop attract mode permanently once user has interacted
+  // Stop attract mode permanently once user has interacted — clears any
+  // pending color drops so they don't fire alongside the user's first taps.
   const stopAttract = () => {
-    if (attractRef.current) {
-      clearInterval(attractRef.current);
-      attractRef.current = null;
+    if (attractRef.current.length) {
+      attractRef.current.forEach(clearTimeout);
+      attractRef.current = [];
     }
   };
 
