@@ -406,7 +406,7 @@ export default function Marbles() {
       // eslint-disable-next-line no-console
       console.info('[marbles] motion perm — orient:', oState, ' motion:', mState, ' hasReqPerm:', hasReqPerm, ' embedded:', isEmbeddedContext);
       // v=p2 marker proves the parallel-Promise build is the one running.
-      setLastPermResult(`v=p2 o=${oState} m=${mState} req=${hasReqPerm} emb=${isEmbeddedContext}`);
+      setLastPermResult(`v=p3 o=${oState} m=${mState} req=${hasReqPerm} emb=${isEmbeddedContext}`);
       motionPermsRef.current = 'done';
 
       // Probe: did events actually start flowing? (works on Android too —
@@ -1295,7 +1295,10 @@ export default function Marbles() {
             <button
               type="button"
               className="mb__motion-prompt"
-              onPointerDown={() => { requestMotionPerms(); }}
+              // iOS Safari is strictest about transient user activation on
+              // `click` — use it for the explicit perm-request button so we
+              // get the most reliable gesture context for requestPermission().
+              onClick={() => { requestMotionPerms(); }}
             >
               <span className="mb__motion-prompt__icon">⤲</span>
               <span className="mb__motion-prompt__label">enable tilt &amp; shake</span>
