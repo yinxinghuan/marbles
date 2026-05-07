@@ -281,6 +281,18 @@ export default function Marbles() {
   const debugMotion = typeof window !== 'undefined' &&
     new URLSearchParams(window.location.search).get('debug') === '1';
   const debugRef = useRef({ beta: 0, gamma: 0, mag: 0 });
+  // We're embedded inside Telegram / Aigram if any of:
+  //   - Telegram WebApp SDK is injected
+  //   - the Aigram launcher attached an `api_origin` query param
+  //   - the page is in an iframe (rough proxy)
+  // In WKWebView-style embeds, DeviceOrientation/Motion permission prompts
+  // generally don't surface — calling requestPermission() silently denies.
+  // Showing the retry pill there just confuses users; suppress instead.
+  const isEmbeddedContext = typeof window !== 'undefined' && (
+    !!(window as unknown as { Telegram?: { WebApp?: unknown } }).Telegram?.WebApp ||
+    new URLSearchParams(window.location.search).has('api_origin') ||
+    (window.parent && window.parent !== window)
+  );
   // Force-rerender ~5x/sec when debug overlay is on so live values refresh.
   const [, setDebugTick] = useState(0);
   useEffect(() => {
@@ -1261,7 +1273,7 @@ export default function Marbles() {
             <span className="mb__score-value">{(scoreDisplay * 100).toString().padStart(5, '0')}</span>
           </div>
           <div className="mb__brand">heirloom edition</div>
-          {motionStatus === 'off' && (
+          {motionStatus === 'off' && !isEmbeddedContext && (
             <button
               type="button"
               className="mb__motion-prompt"
