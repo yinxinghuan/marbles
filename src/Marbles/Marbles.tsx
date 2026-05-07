@@ -377,8 +377,6 @@ export default function Marbles() {
   const requestMotionPerms = () => {
     if (motionPermsRef.current === 'pending') return;
     if (motionPermsRef.current === 'done') return;
-    motionPermsRef.current = 'pending';
-    setMotionStatus('pending');
 
     type Reqable = { requestPermission?: () => Promise<'granted' | 'denied' | 'default'> };
     const O = DeviceOrientationEvent as unknown as Reqable;
@@ -388,8 +386,10 @@ export default function Marbles() {
     const toState = (err: unknown): string =>
       'error: ' + (err instanceof Error ? err.message : String(err));
 
-    // Fire both synchronously inside the user gesture. Each becomes a Promise
-    // we resolve later — never await between the two calls.
+    // Fire requestPermission BEFORE any setState/ref work. Some iOS Safari
+    // versions are sensitive to anything that might pump the event loop
+    // between the user gesture and the permission call. Keep this path as
+    // bare-bones as possible.
     const oPromise: Promise<string> =
       typeof O.requestPermission === 'function'
         ? O.requestPermission().catch(toState)
@@ -399,10 +399,14 @@ export default function Marbles() {
         ? M.requestPermission().catch(toState)
         : Promise.resolve('n/a');
 
+    motionPermsRef.current = 'pending';
+    setMotionStatus('pending');
+
     Promise.all([oPromise, mPromise]).then(([oState, mState]) => {
       // eslint-disable-next-line no-console
       console.info('[marbles] motion perm — orient:', oState, ' motion:', mState, ' hasReqPerm:', hasReqPerm, ' embedded:', isEmbeddedContext);
-      setLastPermResult(`o=${oState} m=${mState} req=${hasReqPerm} emb=${isEmbeddedContext}`);
+      // v=p2 marker proves the parallel-Promise build is the one running.
+      setLastPermResult(`v=p2 o=${oState} m=${mState} req=${hasReqPerm} emb=${isEmbeddedContext}`);
       motionPermsRef.current = 'done';
 
       // Probe: did events actually start flowing? (works on Android too —
