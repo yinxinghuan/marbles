@@ -405,8 +405,7 @@ export default function Marbles() {
     Promise.all([oPromise, mPromise]).then(([oState, mState]) => {
       // eslint-disable-next-line no-console
       console.info('[marbles] motion perm — orient:', oState, ' motion:', mState, ' hasReqPerm:', hasReqPerm, ' embedded:', isEmbeddedContext);
-      // v=p2 marker proves the parallel-Promise build is the one running.
-      setLastPermResult(`v=p3 o=${oState} m=${mState} req=${hasReqPerm} emb=${isEmbeddedContext}`);
+      setLastPermResult(`o=${oState} m=${mState} req=${hasReqPerm} emb=${isEmbeddedContext}`);
       motionPermsRef.current = 'done';
 
       // Probe: did events actually start flowing? (works on Android too —
