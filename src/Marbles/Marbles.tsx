@@ -367,7 +367,14 @@ export default function Marbles() {
   // The function is idempotent except when it has previously failed: in that
   // case a subsequent user gesture (e.g. tapping the "ENABLE" pill) retries.
   const motionPermsRef = useRef<'idle' | 'pending' | 'done'>('idle');
-  const requestMotionPerms = async () => {
+  // iOS Safari has "transient user activation": a tap grants permission to
+  // *one* sensitive API call, and any await/microtask between the tap and the
+  // call consumes the activation. Earlier we did `await O.req()` then
+  // `await M.req()` — only the first was actually inside the gesture; the
+  // second always failed with "requires a user gesture", and on some iOS
+  // versions both reported the error. Fix: kick off BOTH requestPermission()
+  // calls synchronously (no await between them), then await in parallel.
+  const requestMotionPerms = () => {
     if (motionPermsRef.current === 'pending') return;
     if (motionPermsRef.current === 'done') return;
     motionPermsRef.current = 'pending';
@@ -378,34 +385,38 @@ export default function Marbles() {
     const M = DeviceMotionEvent as unknown as Reqable;
     const hasReqPerm = typeof O?.requestPermission === 'function' || typeof M?.requestPermission === 'function';
 
-    let oState: string = 'n/a';
-    let mState: string = 'n/a';
-    try {
-      if (typeof O.requestPermission === 'function') oState = await O.requestPermission();
-    } catch (err) {
-      oState = 'error: ' + (err instanceof Error ? err.message : String(err));
-    }
-    try {
-      if (typeof M.requestPermission === 'function') mState = await M.requestPermission();
-    } catch (err) {
-      mState = 'error: ' + (err instanceof Error ? err.message : String(err));
-    }
-    // eslint-disable-next-line no-console
-    console.info('[marbles] motion perm — orient:', oState, ' motion:', mState, ' hasReqPerm:', hasReqPerm, ' embedded:', isEmbeddedContext);
-    setLastPermResult(`o=${oState} m=${mState} req=${hasReqPerm} emb=${isEmbeddedContext}`);
-    motionPermsRef.current = 'done';
+    const toState = (err: unknown): string =>
+      'error: ' + (err instanceof Error ? err.message : String(err));
 
-    // Probe: did events actually start flowing? (works on Android too — the
-    // probe just confirms sensors are alive.)
-    setTimeout(() => {
-      if (orientReceivedRef.current || motionReceivedRef.current) {
-        setMotionStatus('on');
-      } else {
-        setMotionStatus('off');
-        // Allow the explicit "ENABLE" pill to retry.
-        motionPermsRef.current = 'idle';
-      }
-    }, 1500);
+    // Fire both synchronously inside the user gesture. Each becomes a Promise
+    // we resolve later — never await between the two calls.
+    const oPromise: Promise<string> =
+      typeof O.requestPermission === 'function'
+        ? O.requestPermission().catch(toState)
+        : Promise.resolve('n/a');
+    const mPromise: Promise<string> =
+      typeof M.requestPermission === 'function'
+        ? M.requestPermission().catch(toState)
+        : Promise.resolve('n/a');
+
+    Promise.all([oPromise, mPromise]).then(([oState, mState]) => {
+      // eslint-disable-next-line no-console
+      console.info('[marbles] motion perm — orient:', oState, ' motion:', mState, ' hasReqPerm:', hasReqPerm, ' embedded:', isEmbeddedContext);
+      setLastPermResult(`o=${oState} m=${mState} req=${hasReqPerm} emb=${isEmbeddedContext}`);
+      motionPermsRef.current = 'done';
+
+      // Probe: did events actually start flowing? (works on Android too —
+      // the probe just confirms sensors are alive.)
+      setTimeout(() => {
+        if (orientReceivedRef.current || motionReceivedRef.current) {
+          setMotionStatus('on');
+        } else {
+          setMotionStatus('off');
+          // Allow the explicit "ENABLE" pill to retry.
+          motionPermsRef.current = 'idle';
+        }
+      }, 1500);
+    });
   };
 
   // Main RAF loop
@@ -1280,7 +1291,7 @@ export default function Marbles() {
             <button
               type="button"
               className="mb__motion-prompt"
-              onPointerDown={() => { void requestMotionPerms(); }}
+              onPointerDown={() => { requestMotionPerms(); }}
             >
               <span className="mb__motion-prompt__icon">⤲</span>
               <span className="mb__motion-prompt__label">enable tilt &amp; shake</span>
