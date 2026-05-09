@@ -289,14 +289,19 @@ export default function Marbles() {
     new URLSearchParams(window.location.search).get('debug') === '1';
   const debugRef = useRef({ beta: 0, gamma: 0, mag: 0 });
   // We're embedded inside Telegram / Aigram if any of:
-  //   - Telegram WebApp SDK is injected
+  //   - Telegram WebApp launched us (initData populated by the host)
   //   - the Aigram launcher attached an `api_origin` query param
   //   - the page is in an iframe (rough proxy)
-  // In WKWebView-style embeds, DeviceOrientation/Motion permission prompts
-  // generally don't surface — calling requestPermission() silently denies.
-  // Showing the retry pill there just confuses users; suppress instead.
+  // We check `initData` (not just `Telegram.WebApp` presence) because we now
+  // load `telegram-web-app.js` in index.html — that injects `Telegram.WebApp`
+  // even in plain Safari, but `initData` is only populated when the page was
+  // actually launched from Telegram. In WKWebView-style embeds, DOM
+  // DeviceOrientation/Motion permission prompts silently deny — showing the
+  // retry pill confuses users; suppress instead. Telegram's own sensor APIs
+  // (window.Telegram.WebApp.{Accelerometer, DeviceOrientation}) are wired up
+  // separately below.
   const isEmbeddedContext = typeof window !== 'undefined' && (
-    !!(window as unknown as { Telegram?: { WebApp?: unknown } }).Telegram?.WebApp ||
+    !!(window as unknown as { Telegram?: { WebApp?: { initData?: string } } }).Telegram?.WebApp?.initData ||
     new URLSearchParams(window.location.search).has('api_origin') ||
     (window.parent && window.parent !== window)
   );
@@ -360,6 +365,100 @@ export default function Marbles() {
     }
     window.addEventListener('devicemotion', onMotion);
     return () => window.removeEventListener('devicemotion', onMotion);
+  }, [debugMotion]);
+
+  // Telegram WebApp sensors — preferred path inside Telegram / Aigram, where
+  // standard DeviceOrientation / DeviceMotion are blocked at the WebView level.
+  // Telegram exposes its own Accelerometer + DeviceOrientation objects (Bot API
+  // 8.0+); we bridge them into the same gravityRef / shakeAllRef as the DOM path
+  // so the rest of the game is sensor-source-agnostic.
+  // Units differ from the DOM API:
+  //   - DeviceOrientation alpha/beta/gamma are RADIANS (DOM uses degrees)
+  //   - Accelerometer x/y/z include gravity (rest ≈ 9.8 on the up axis); there
+  //     is no gravity-removed variant, so we always use the gravity-included
+  //     shake threshold path.
+  // See `reference_telegram_webapp_sensors.md` for the full API.
+  useEffect(() => {
+    type TgSensor = {
+      isStarted: boolean;
+      start: (params: { refresh_rate?: number; need_absolute?: boolean }, cb?: (ok: boolean) => void) => unknown;
+      stop: (cb?: (ok: boolean) => void) => unknown;
+    };
+    type TgEventHandler = (...args: unknown[]) => void;
+    type TgWebApp = {
+      initData?: string;
+      onEvent: (event: string, handler: TgEventHandler) => void;
+      offEvent: (event: string, handler: TgEventHandler) => void;
+      Accelerometer?: TgSensor & { x: number; y: number; z: number };
+      DeviceOrientation?: TgSensor & { alpha: number; beta: number; gamma: number; absolute: boolean };
+    };
+    const tg = (window as unknown as { Telegram?: { WebApp?: TgWebApp } }).Telegram?.WebApp;
+    if (!tg?.initData) return;            // not really inside Telegram — DOM path handles it
+    if (!tg.Accelerometer && !tg.DeviceOrientation) return;  // host on Bot API < 8.0
+
+    let lastShakeFire = 0;
+    const RAD2DEG = 180 / Math.PI;
+
+    const onOrient: TgEventHandler = () => {
+      const o = tg.DeviceOrientation;
+      if (!o) return;
+      orientReceivedRef.current = true;
+      if (motionStatusRef.current !== 'on') setMotionStatus('on');
+      const beta = (o.beta ?? 0) * RAD2DEG;     // radians → degrees, match DOM math
+      const gamma = (o.gamma ?? 0) * RAD2DEG;
+      const gx = Math.max(-1, Math.min(1, gamma / 45));
+      const gy = Math.max(-1, Math.min(1, beta / 45));
+      const targetX = gx * GRAVITY_BASE * 1.4;
+      const targetY = Math.max(0.05, gy * GRAVITY_BASE * 1.4);
+      gravityRef.current.gx += (targetX - gravityRef.current.gx) * 0.06;
+      gravityRef.current.gy += (targetY - gravityRef.current.gy) * 0.06;
+      if (debugMotion) {
+        debugRef.current.beta = beta;
+        debugRef.current.gamma = gamma;
+      }
+    };
+
+    const onAccel: TgEventHandler = () => {
+      const a = tg.Accelerometer;
+      if (!a) return;
+      motionReceivedRef.current = true;
+      const ax = a.x ?? 0, ay = a.y ?? 0, az = a.z ?? 0;
+      const mag = Math.sqrt(ax * ax + ay * ay + az * az);
+      const jolt = Math.abs(mag - 9.8);         // rest ≈ 9.8, threshold means "above-rest jolt"
+      if (debugMotion) debugRef.current.mag = jolt;
+      const threshold = 14;
+      const now = performance.now();
+      if (jolt > threshold && now - lastShakeFire > 600) {
+        lastShakeFire = now;
+        shakeAllRef.current();
+      }
+    };
+
+    const onFailed: TgEventHandler = (e: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn('[marbles] Telegram sensor failed:', e);
+      if (motionStatusRef.current !== 'on') setMotionStatus('off');
+    };
+
+    tg.onEvent('deviceOrientationChanged', onOrient);
+    tg.onEvent('accelerometerChanged', onAccel);
+    tg.onEvent('deviceOrientationFailed', onFailed);
+    tg.onEvent('accelerometerFailed', onFailed);
+
+    setMotionStatus('pending');
+    // 50 ms ≈ 20 Hz — plenty for tilt/shake; saves battery vs. the 20 ms cap.
+    tg.DeviceOrientation?.start({ refresh_rate: 50 });
+    tg.Accelerometer?.start({ refresh_rate: 50 });
+
+    return () => {
+      tg.offEvent('deviceOrientationChanged', onOrient);
+      tg.offEvent('accelerometerChanged', onAccel);
+      tg.offEvent('deviceOrientationFailed', onFailed);
+      tg.offEvent('accelerometerFailed', onFailed);
+      tg.DeviceOrientation?.stop();
+      tg.Accelerometer?.stop();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debugMotion]);
 
   // iOS 13+ gates motion / orientation behind a per-session permission prompt
