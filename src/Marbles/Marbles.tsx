@@ -520,13 +520,22 @@ export default function Marbles() {
     if (typeof window === 'undefined') return;
     if (!window.parent || window.parent === window) return;   // not iframed → no host
 
-    // Smoothed gravity vector (the part that decays slowly toward `accel`).
-    // After settling: |grav| ≈ 9.8 along whichever device axis is "up".
-    const grav = { x: 0, y: 0, z: 0 };
-    let gravInited = false;
-    const SMOOTH = 0.08;          // gravity low-pass coefficient
-    const SHAKE_THRESHOLD = 14;   // m/s² of linear (gravity-removed) accel
+    // Light low-pass on raw accel — just enough to take the edge off sensor
+    // noise without adding perceptible lag. We DON'T do the slow gravity-
+    // extraction filter (was SMOOTH=0.08 ≈ 600ms) because that caused tilt
+    // to lag noticeably behind the user's hand. Instead we treat the smoothed
+    // accel directly as a gravity proxy — the user's deliberate tilts are
+    // captured immediately, and the brief direction noise during a shake
+    // doesn't matter because shake also fires the spring (balls go up
+    // regardless of horizontal gravity for that ~600ms).
+    const accelSmooth = { x: 0, y: 0, z: 0 };
+    let primed = false;
+    const SMOOTH = 0.35;          // ~70ms time constant at 50Hz
     const G_NOM = 9.8;
+    // Tilt gain: divide by sin(45°)*g so a 45° tilt saturates the steering
+    // signal — matches the DOM `gamma/45` feel.
+    const TILT_GAIN = G_NOM * Math.SQRT1_2;   // ≈ 6.93
+    const SHAKE_THRESHOLD = 14;   // m/s² above-rest jolt
     let lastShakeFire = 0;
 
     const onMessage = (ev: MessageEvent) => {
@@ -545,56 +554,49 @@ export default function Marbles() {
       motionReceivedRef.current = true;
       if (motionStatusRef.current !== 'on') setMotionStatus('on');
 
-      // Update gravity estimate (low-pass) — first sample seeds directly.
-      if (!gravInited) {
-        grav.x = data.x; grav.y = data.y; grav.z = data.z;
-        gravInited = true;
+      if (!primed) {
+        accelSmooth.x = data.x; accelSmooth.y = data.y; accelSmooth.z = data.z;
+        primed = true;
       } else {
-        grav.x += (data.x - grav.x) * SMOOTH;
-        grav.y += (data.y - grav.y) * SMOOTH;
-        grav.z += (data.z - grav.z) * SMOOTH;
+        accelSmooth.x += (data.x - accelSmooth.x) * SMOOTH;
+        accelSmooth.y += (data.y - accelSmooth.y) * SMOOTH;
+        accelSmooth.z += (data.z - accelSmooth.z) * SMOOTH;
       }
 
-      // Tilt → in-game gravity vector. Sign convention matches DOM path:
+      // Tilt → in-game gravity. Sign convention matches DOM path:
       // tilt right (gravity in +x device axis) → balls roll right (+gx).
-      // The screen-y axis points down in the game canvas, so we flip gy so
-      // tilting the top of the phone away from the user pulls balls upward
-      // — same direction as the DOM gamma/beta path. Verify on device; flip
-      // if signs are wrong.
-      const gxNorm = Math.max(-1, Math.min(1, grav.x / G_NOM));
-      const gyNorm = Math.max(-1, Math.min(1, grav.y / G_NOM));
+      // Canvas y is down, so we flip gy. Verify on device; flip if wrong.
+      const gxNorm = Math.max(-1, Math.min(1, accelSmooth.x / TILT_GAIN));
+      const gyNorm = Math.max(-1, Math.min(1, accelSmooth.y / TILT_GAIN));
       const targetX = gxNorm * GRAVITY_BASE * 1.4;
       const targetY = Math.max(0.05, -gyNorm * GRAVITY_BASE * 1.4);
-      gravityRef.current.gx += (targetX - gravityRef.current.gx) * 0.06;
-      gravityRef.current.gy += (targetY - gravityRef.current.gy) * 0.06;
+      // Faster downstream lerp (was 0.06) — needed because postMessage adds
+      // ~one-frame latency on top of the sensor sample rate.
+      gravityRef.current.gx += (targetX - gravityRef.current.gx) * 0.18;
+      gravityRef.current.gy += (targetY - gravityRef.current.gy) * 0.18;
 
-      // Shake → linear accel = raw - gravity. Threshold + cooldown identical
-      // to the DOM motion path.
-      const lx = data.x - grav.x;
-      const ly = data.y - grav.y;
-      const lz = data.z - grav.z;
-      const linMag = Math.sqrt(lx * lx + ly * ly + lz * lz);
+      // Shake → magnitude minus gravity baseline. Same as the DOM
+      // accelerationIncludingGravity branch.
+      const mag = Math.sqrt(data.x * data.x + data.y * data.y + data.z * data.z);
+      const jolt = Math.abs(mag - G_NOM);
       const now = performance.now();
-      if (linMag > SHAKE_THRESHOLD && now - lastShakeFire > 600) {
+      if (jolt > SHAKE_THRESHOLD && now - lastShakeFire > 600) {
         lastShakeFire = now;
         shakeAllRef.current();
       }
 
       if (debugMotion) {
-        // Express normalized gravity as pseudo-degrees so the existing β/γ
-        // line stays useful no matter which sensor source is feeding it.
         debugRef.current.beta = -gyNorm * 45;
         debugRef.current.gamma = gxNorm * 45;
-        debugRef.current.mag = linMag;
+        debugRef.current.mag = jolt;
       }
     };
 
     window.addEventListener('message', onMessage);
 
-    // Subscribe — payload is standard (not URL-safe) base64 of JSON. Since
-    // {"refresh_rate":50} is pure ASCII, plain btoa works without the
-    // unicode-safe wrapper.
-    const sub = `TG.ACCELEROMETER-${btoa(JSON.stringify({ refresh_rate: 50 }))}`;
+    // Subscribe at Telegram's max rate (20ms ≈ 50Hz). Payload is standard
+    // (not URL-safe) base64 of JSON; pure ASCII so plain btoa works.
+    const sub = `TG.ACCELEROMETER-${btoa(JSON.stringify({ refresh_rate: 20 }))}`;
     window.parent.postMessage(sub, '*');
     aigramBridgeStateRef.current = 'requested';
     // eslint-disable-next-line no-console
