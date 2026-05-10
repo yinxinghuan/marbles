@@ -288,6 +288,13 @@ export default function Marbles() {
   const debugMotion = typeof window !== 'undefined' &&
     new URLSearchParams(window.location.search).get('debug') === '1';
   const debugRef = useRef({ beta: 0, gamma: 0, mag: 0 });
+  // Once the Telegram path delivers any event, lock DOM handlers as no-ops so
+  // we don't double-write gravity. Also dramatically cuts Permissions Policy
+  // console spam in Telegram-hosted contexts where DOM motion is policy-gated.
+  const tgActiveRef = useRef(false);
+  // Debug strings for the Telegram sensor lifecycle (start / change / fail)
+  const tgAccelStateRef = useRef<string>('—');
+  const tgOrientStateRef = useRef<string>('—');
   // We're embedded inside Telegram / Aigram if any of:
   //   - Telegram WebApp launched us (initData populated by the host)
   //   - the Aigram launcher attached an `api_origin` query param
@@ -318,6 +325,7 @@ export default function Marbles() {
   // 'granted' inside a user gesture — see requestMotionPerms() below.
   useEffect(() => {
     function onOrient(e: DeviceOrientationEvent) {
+      if (tgActiveRef.current) return;        // Telegram path is authoritative once active
       if (e.beta == null && e.gamma == null) return;
       orientReceivedRef.current = true;
       if (motionStatusRef.current !== 'on') setMotionStatus('on');
@@ -345,6 +353,7 @@ export default function Marbles() {
   useEffect(() => {
     let lastFire = 0;
     function onMotion(e: DeviceMotionEvent) {
+      if (tgActiveRef.current) return;        // Telegram path is authoritative once active
       motionReceivedRef.current = true;
       const accel = e.acceleration && e.acceleration.x !== null ? e.acceleration : null;
       const a = accel ?? e.accelerationIncludingGravity;
@@ -372,6 +381,13 @@ export default function Marbles() {
   // Telegram exposes its own Accelerometer + DeviceOrientation objects (Bot API
   // 8.0+); we bridge them into the same gravityRef / shakeAllRef as the DOM path
   // so the rest of the game is sensor-source-agnostic.
+  // Detection: we DO NOT gate on `Telegram.WebApp.initData`. When this iframe
+  // is nested inside Aigram (which itself is the Telegram Mini App), `initData`
+  // is empty in our window — Telegram populated it on Aigram's window, not
+  // ours. But Aigram's Telegram bridge still services Accelerometer.start()
+  // calls from descendant frames. So the only reliable detection is "try to
+  // start, see if events arrive". `tgActiveRef` flips on the first event and
+  // suppresses the DOM path so we don't double-write.
   // Units differ from the DOM API:
   //   - DeviceOrientation alpha/beta/gamma are RADIANS (DOM uses degrees)
   //   - Accelerometer x/y/z include gravity (rest ≈ 9.8 on the up axis); there
@@ -393,8 +409,7 @@ export default function Marbles() {
       DeviceOrientation?: TgSensor & { alpha: number; beta: number; gamma: number; absolute: boolean };
     };
     const tg = (window as unknown as { Telegram?: { WebApp?: TgWebApp } }).Telegram?.WebApp;
-    if (!tg?.initData) return;            // not really inside Telegram — DOM path handles it
-    if (!tg.Accelerometer && !tg.DeviceOrientation) return;  // host on Bot API < 8.0
+    if (!tg?.Accelerometer && !tg?.DeviceOrientation) return;  // SDK missing or pre-8.0
 
     let lastShakeFire = 0;
     const RAD2DEG = 180 / Math.PI;
@@ -402,6 +417,8 @@ export default function Marbles() {
     const onOrient: TgEventHandler = () => {
       const o = tg.DeviceOrientation;
       if (!o) return;
+      tgActiveRef.current = true;
+      tgOrientStateRef.current = 'changed';
       orientReceivedRef.current = true;
       if (motionStatusRef.current !== 'on') setMotionStatus('on');
       const beta = (o.beta ?? 0) * RAD2DEG;     // radians → degrees, match DOM math
@@ -421,6 +438,8 @@ export default function Marbles() {
     const onAccel: TgEventHandler = () => {
       const a = tg.Accelerometer;
       if (!a) return;
+      tgActiveRef.current = true;
+      tgAccelStateRef.current = 'changed';
       motionReceivedRef.current = true;
       const ax = a.x ?? 0, ay = a.y ?? 0, az = a.z ?? 0;
       const mag = Math.sqrt(ax * ax + ay * ay + az * az);
@@ -434,27 +453,48 @@ export default function Marbles() {
       }
     };
 
-    const onFailed: TgEventHandler = (e: unknown) => {
+    const onAccelStarted: TgEventHandler = () => { tgAccelStateRef.current = 'started'; };
+    const onOrientStarted: TgEventHandler = () => { tgOrientStateRef.current = 'started'; };
+    const onAccelFailed: TgEventHandler = (e: unknown) => {
+      tgAccelStateRef.current = 'failed:' + summarizeErr(e);
       // eslint-disable-next-line no-console
-      console.warn('[marbles] Telegram sensor failed:', e);
-      if (motionStatusRef.current !== 'on') setMotionStatus('off');
+      console.warn('[marbles] Telegram accel failed (likely not in Telegram):', e);
+      // Don't flip motionStatus — DOM path may still deliver in Safari/iOS-native.
     };
+    const onOrientFailed: TgEventHandler = (e: unknown) => {
+      tgOrientStateRef.current = 'failed:' + summarizeErr(e);
+      // eslint-disable-next-line no-console
+      console.warn('[marbles] Telegram orient failed (likely not in Telegram):', e);
+    };
+    function summarizeErr(e: unknown): string {
+      if (e && typeof e === 'object' && 'error' in e) return String((e as { error: unknown }).error);
+      return typeof e === 'string' ? e : 'unknown';
+    }
 
     tg.onEvent('deviceOrientationChanged', onOrient);
     tg.onEvent('accelerometerChanged', onAccel);
-    tg.onEvent('deviceOrientationFailed', onFailed);
-    tg.onEvent('accelerometerFailed', onFailed);
+    tg.onEvent('deviceOrientationStarted', onOrientStarted);
+    tg.onEvent('accelerometerStarted', onAccelStarted);
+    tg.onEvent('deviceOrientationFailed', onOrientFailed);
+    tg.onEvent('accelerometerFailed', onAccelFailed);
 
-    setMotionStatus('pending');
     // 50 ms ≈ 20 Hz — plenty for tilt/shake; saves battery vs. the 20 ms cap.
-    tg.DeviceOrientation?.start({ refresh_rate: 50 });
-    tg.Accelerometer?.start({ refresh_rate: 50 });
+    tg.DeviceOrientation?.start({ refresh_rate: 50 }, (ok: boolean) => {
+      // eslint-disable-next-line no-console
+      console.info('[marbles] tg orient start cb:', ok);
+    });
+    tg.Accelerometer?.start({ refresh_rate: 50 }, (ok: boolean) => {
+      // eslint-disable-next-line no-console
+      console.info('[marbles] tg accel start cb:', ok);
+    });
 
     return () => {
       tg.offEvent('deviceOrientationChanged', onOrient);
       tg.offEvent('accelerometerChanged', onAccel);
-      tg.offEvent('deviceOrientationFailed', onFailed);
-      tg.offEvent('accelerometerFailed', onFailed);
+      tg.offEvent('deviceOrientationStarted', onOrientStarted);
+      tg.offEvent('accelerometerStarted', onAccelStarted);
+      tg.offEvent('deviceOrientationFailed', onOrientFailed);
+      tg.offEvent('accelerometerFailed', onAccelFailed);
       tg.DeviceOrientation?.stop();
       tg.Accelerometer?.stop();
     };
@@ -1418,6 +1458,9 @@ export default function Marbles() {
               <div>β:{Math.round(debugRef.current.beta)}° γ:{Math.round(debugRef.current.gamma)}°</div>
               <div>jolt:{debugRef.current.mag.toFixed(1)}</div>
               <div>embed: {isEmbeddedContext ? 'yes' : 'no'}</div>
+              <div>tg active: {tgActiveRef.current ? 'yes' : 'no'}</div>
+              <div>tg accel: {tgAccelStateRef.current}</div>
+              <div>tg orient: {tgOrientStateRef.current}</div>
               <div>perm: {lastPermResult}</div>
             </div>
           )}
