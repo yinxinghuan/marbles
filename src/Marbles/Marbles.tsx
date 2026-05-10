@@ -288,13 +288,16 @@ export default function Marbles() {
   const debugMotion = typeof window !== 'undefined' &&
     new URLSearchParams(window.location.search).get('debug') === '1';
   const debugRef = useRef({ beta: 0, gamma: 0, mag: 0 });
-  // Once the Telegram path delivers any event, lock DOM handlers as no-ops so
-  // we don't double-write gravity. Also dramatically cuts Permissions Policy
-  // console spam in Telegram-hosted contexts where DOM motion is policy-gated.
+  // Once any sensor bridge (Telegram-direct or Aigram-postMessage) delivers
+  // an event, lock DOM handlers as no-ops so we don't double-write gravity.
+  // Also cuts Permissions Policy console spam in WebView contexts where
+  // DOM motion is policy-gated.
   const tgActiveRef = useRef(false);
-  // Debug strings for the Telegram sensor lifecycle (start / change / fail)
+  // Debug strings for the Telegram-direct sensor lifecycle
   const tgAccelStateRef = useRef<string>('—');
   const tgOrientStateRef = useRef<string>('—');
+  // Debug string for the Aigram postMessage bridge lifecycle
+  const aigramBridgeStateRef = useRef<string>('—');
   // We're embedded inside Telegram / Aigram if any of:
   //   - Telegram WebApp launched us (initData populated by the host)
   //   - the Aigram launcher attached an `api_origin` query param
@@ -498,6 +501,106 @@ export default function Marbles() {
       tg.DeviceOrientation?.stop();
       tg.Accelerometer?.stop();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debugMotion]);
+
+  // Aigram System API bridge — when our game is iframed inside the Aigram
+  // mini app (which is itself a Telegram Mini App), Telegram's WebApp.* sensor
+  // bridge is established on Aigram's window, not ours. Aigram instead exposes
+  // a postMessage relay:
+  //   iframe → host: "TG.ACCELEROMETER" or "TG.ACCELEROMETER-<base64({refresh_rate})>"
+  //   host → iframe: "TG.ACCELEROMETER.CHANGED-<base64({x, y, z})>"
+  // Cleanup is automatic when our iframe is removed from the DOM, so we only
+  // need to remove our own message listener on unmount.
+  // The bridge only carries Accelerometer (no DeviceOrientation), so we derive
+  // tilt by low-pass-filtering the gravity component out of the raw accel and
+  // shake from the high-pass residual.
+  // Protocol reference: IFRAME_GUIDE.md from the Aigram team.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!window.parent || window.parent === window) return;   // not iframed → no host
+
+    // Smoothed gravity vector (the part that decays slowly toward `accel`).
+    // After settling: |grav| ≈ 9.8 along whichever device axis is "up".
+    const grav = { x: 0, y: 0, z: 0 };
+    let gravInited = false;
+    const SMOOTH = 0.08;          // gravity low-pass coefficient
+    const SHAKE_THRESHOLD = 14;   // m/s² of linear (gravity-removed) accel
+    const G_NOM = 9.8;
+    let lastShakeFire = 0;
+
+    const onMessage = (ev: MessageEvent) => {
+      const raw = ev.data;
+      if (typeof raw !== 'string') return;
+      const PREFIX = 'TG.ACCELEROMETER.CHANGED-';
+      if (!raw.startsWith(PREFIX)) return;
+      let data: { x: number; y: number; z: number };
+      try {
+        data = JSON.parse(atob(raw.slice(PREFIX.length))) as { x: number; y: number; z: number };
+      } catch { return; }
+
+      tgActiveRef.current = true;
+      aigramBridgeStateRef.current = 'changed';
+      orientReceivedRef.current = true;
+      motionReceivedRef.current = true;
+      if (motionStatusRef.current !== 'on') setMotionStatus('on');
+
+      // Update gravity estimate (low-pass) — first sample seeds directly.
+      if (!gravInited) {
+        grav.x = data.x; grav.y = data.y; grav.z = data.z;
+        gravInited = true;
+      } else {
+        grav.x += (data.x - grav.x) * SMOOTH;
+        grav.y += (data.y - grav.y) * SMOOTH;
+        grav.z += (data.z - grav.z) * SMOOTH;
+      }
+
+      // Tilt → in-game gravity vector. Sign convention matches DOM path:
+      // tilt right (gravity in +x device axis) → balls roll right (+gx).
+      // The screen-y axis points down in the game canvas, so we flip gy so
+      // tilting the top of the phone away from the user pulls balls upward
+      // — same direction as the DOM gamma/beta path. Verify on device; flip
+      // if signs are wrong.
+      const gxNorm = Math.max(-1, Math.min(1, grav.x / G_NOM));
+      const gyNorm = Math.max(-1, Math.min(1, grav.y / G_NOM));
+      const targetX = gxNorm * GRAVITY_BASE * 1.4;
+      const targetY = Math.max(0.05, -gyNorm * GRAVITY_BASE * 1.4);
+      gravityRef.current.gx += (targetX - gravityRef.current.gx) * 0.06;
+      gravityRef.current.gy += (targetY - gravityRef.current.gy) * 0.06;
+
+      // Shake → linear accel = raw - gravity. Threshold + cooldown identical
+      // to the DOM motion path.
+      const lx = data.x - grav.x;
+      const ly = data.y - grav.y;
+      const lz = data.z - grav.z;
+      const linMag = Math.sqrt(lx * lx + ly * ly + lz * lz);
+      const now = performance.now();
+      if (linMag > SHAKE_THRESHOLD && now - lastShakeFire > 600) {
+        lastShakeFire = now;
+        shakeAllRef.current();
+      }
+
+      if (debugMotion) {
+        // Express normalized gravity as pseudo-degrees so the existing β/γ
+        // line stays useful no matter which sensor source is feeding it.
+        debugRef.current.beta = -gyNorm * 45;
+        debugRef.current.gamma = gxNorm * 45;
+        debugRef.current.mag = linMag;
+      }
+    };
+
+    window.addEventListener('message', onMessage);
+
+    // Subscribe — payload is standard (not URL-safe) base64 of JSON. Since
+    // {"refresh_rate":50} is pure ASCII, plain btoa works without the
+    // unicode-safe wrapper.
+    const sub = `TG.ACCELEROMETER-${btoa(JSON.stringify({ refresh_rate: 50 }))}`;
+    window.parent.postMessage(sub, '*');
+    aigramBridgeStateRef.current = 'requested';
+    // eslint-disable-next-line no-console
+    console.info('[marbles] aigram bridge subscribed:', sub);
+
+    return () => window.removeEventListener('message', onMessage);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debugMotion]);
 
@@ -1461,6 +1564,7 @@ export default function Marbles() {
               <div>tg active: {tgActiveRef.current ? 'yes' : 'no'}</div>
               <div>tg accel: {tgAccelStateRef.current}</div>
               <div>tg orient: {tgOrientStateRef.current}</div>
+              <div>aigram br: {aigramBridgeStateRef.current}</div>
               <div>perm: {lastPermResult}</div>
             </div>
           )}
