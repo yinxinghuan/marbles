@@ -1591,22 +1591,21 @@ export default function Marbles() {
             <span className="mb__score-value">{(scoreDisplay * 100).toString().padStart(5, '0')}</span>
           </div>
           <div className="mb__brand">heirloom edition</div>
-          {motionStatus === 'off' && !isEmbeddedContext && (
-            <button
-              type="button"
-              className="mb__motion-prompt"
-              // iOS Safari is strictest about transient user activation on
-              // `click` — use it for the explicit perm-request button so we
-              // get the most reliable gesture context for requestPermission().
-              onClick={() => { requestMotionPerms(); }}
-            >
-              <span className="mb__motion-prompt__icon">⤲</span>
-              <span className="mb__motion-prompt__label">enable tilt &amp; shake</span>
-            </button>
-          )}
-          {/* Sensor hint — Material Icons screen_rotation, shown after first touch. */}
+          {/* Sensor hint — Material Icons screen_rotation, shown after first touch.
+              The icon itself is the iOS sensor-permission button: tapping it
+              fires requestPermission() in a real user-gesture context. */}
           <div className={'mb__sensor-hint' + (showSensorHint ? ' is-visible' : '')}>
-            <div className="mb__sensor-hint__icon" aria-hidden="true">
+            <div
+              className="mb__sensor-hint__icon"
+              role="button"
+              tabIndex={0}
+              onClick={(e) => {
+                e.stopPropagation();
+                requestMotionPerms();
+                sensorHintDoneRef.current = true;
+                setShowSensorHint(false);
+              }}
+            >
               <svg viewBox="0 0 24 24"><path d="M16.48 2.52c3.27 1.55 5.61 4.72 5.97 8.48h1.5C23.44 4.84 18.29 0 12 0l-.66.03 3.81 3.81 1.33-1.32zm-6.25-.77c-.59-.59-1.54-.59-2.12 0L1.75 8.11c-.59.59-.59 1.54 0 2.12l12.02 12.02c.59.59 1.54.59 2.12 0l6.36-6.36c.59-.59.59-1.54 0-2.12L10.23 1.75zm4.6 19.44L2.81 9.17l6.36-6.36 12.02 12.02-6.36 6.36zm-7.31.29C4.25 19.94 1.91 16.76 1.55 13H.05C.56 19.16 5.71 24 12 24l.66-.03-3.81-3.81-1.33 1.32z"/></svg>
             </div>
             <div className="mb__sensor-hint__label">Tilt &amp; Shake</div>
