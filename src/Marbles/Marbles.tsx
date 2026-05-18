@@ -283,6 +283,55 @@ export default function Marbles() {
   const [motionStatus, setMotionStatus] = useState<'idle' | 'pending' | 'on' | 'off'>('idle');
   const motionStatusRef = useRef<typeof motionStatus>('idle');
   motionStatusRef.current = motionStatus;
+  // Sensor hint — Material screen_rotation icon swinging, "TILT & SHAKE"
+  // label. Visible after first touch when sensor path is available, fades
+  // automatically after 7s (or never appears if no sensor path).
+  const [showSensorHint, setShowSensorHint] = useState(false);
+  const sensorHintDoneRef = useRef(false);
+
+  // Trigger sensor hint after first touch — only if there's any chance the
+  // device will deliver motion data. 0.9s delay so the canvas sub-hint
+  // ("TAP A COLOR · DROP · MERGE · SHAKE") gets first focus.
+  useEffect(() => {
+    if (!hasTouched || sensorHintDoneRef.current) return;
+    const hasSensorPath =
+      (typeof window !== 'undefined' && (window as any).Telegram?.WebApp?.Accelerometer) ||
+      (typeof DeviceMotionEvent !== 'undefined') ||
+      isEmbeddedContext;
+    if (!hasSensorPath) return;
+    const showTimer = window.setTimeout(() => {
+      if (sensorHintDoneRef.current) return;
+      setShowSensorHint(true);
+    }, 900);
+    const hideTimer = window.setTimeout(() => {
+      sensorHintDoneRef.current = true;
+      setShowSensorHint(false);
+    }, 900 + 7000);
+    return () => {
+      window.clearTimeout(showTimer);
+      window.clearTimeout(hideTimer);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasTouched]);
+
+  // Dismiss the sensor hint the moment the user actually tilts the device.
+  useEffect(() => {
+    if (!showSensorHint) return;
+    let raf = 0;
+    function check() {
+      const g = gravityRef.current;
+      // gx is horizontal tilt (-1..1). Anything past 0.4 is a deliberate tilt.
+      if (g && Math.abs(g.gx) > 0.4) {
+        sensorHintDoneRef.current = true;
+        setShowSensorHint(false);
+        return;
+      }
+      raf = window.requestAnimationFrame(check);
+    }
+    raf = window.requestAnimationFrame(check);
+    return () => window.cancelAnimationFrame(raf);
+  }, [showSensorHint]);
+
   // Track the most recent permission result so the debug overlay can show it
   const [lastPermResult, setLastPermResult] = useState<string>('—');
   const debugMotion = typeof window !== 'undefined' &&
@@ -1555,6 +1604,13 @@ export default function Marbles() {
               <span className="mb__motion-prompt__label">enable tilt &amp; shake</span>
             </button>
           )}
+          {/* Sensor hint — Material Icons screen_rotation, shown after first touch. */}
+          <div className={'mb__sensor-hint' + (showSensorHint ? ' is-visible' : '')}>
+            <div className="mb__sensor-hint__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M16.48 2.52c3.27 1.55 5.61 4.72 5.97 8.48h1.5C23.44 4.84 18.29 0 12 0l-.66.03 3.81 3.81 1.33-1.32zm-6.25-.77c-.59-.59-1.54-.59-2.12 0L1.75 8.11c-.59.59-.59 1.54 0 2.12l12.02 12.02c.59.59 1.54.59 2.12 0l6.36-6.36c.59-.59.59-1.54 0-2.12L10.23 1.75zm4.6 19.44L2.81 9.17l6.36-6.36 12.02 12.02-6.36 6.36zm-7.31.29C4.25 19.94 1.91 16.76 1.55 13H.05C.56 19.16 5.71 24 12 24l.66-.03-3.81-3.81-1.33 1.32z"/></svg>
+            </div>
+            <div className="mb__sensor-hint__label">Tilt &amp; Shake</div>
+          </div>
           {debugMotion && (
             <div className="mb__debug">
               <div>status: {motionStatus}</div>
