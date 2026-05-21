@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useGameScore, Leaderboard } from '@shared/leaderboard';
 import './Marbles.less';
 
 // ── Aesthetic palette: 6 distinct hues so same-color merge is unambiguous ──
@@ -128,6 +129,8 @@ export default function Marbles() {
   const [scoreDisplay, setScoreDisplay] = useState(0);
   const [gameOver, setGameOver] = useState(false);
   const gameOverRef = useRef(false);
+  const [showLeaderboard, setShowLeaderboard] = useState(false);
+  const { isInAigram, canRank, submitScore, fetchLeaderboard } = useGameScore();
   // Attract mode pending timers. Bounded — we drop one ball per palette color
   // (6 total) and then stop. Bounded because the games list preloads us in
   // the background; an unbounded drip would fill the screen if the user
@@ -1415,6 +1418,8 @@ export default function Marbles() {
     if (depleted) {
       gameOverRef.current = true;
       setGameOver(true);
+      const final = burstScoreRef.current * 100;
+      if (final > 0) submitScore(final).catch(() => { /* silent */ });
     }
     shakeFlashRef.current = 1;
     playThud();
@@ -1634,8 +1639,24 @@ export default function Marbles() {
                 <button className="mb__game-over__btn" onPointerDown={resetGame}>
                   play again
                 </button>
+                {canRank && (
+                  <button
+                    className="mb__game-over__lb"
+                    onPointerDown={() => setShowLeaderboard(true)}
+                  >
+                    🏆 leaderboard
+                  </button>
+                )}
               </div>
             </div>
+          )}
+          {showLeaderboard && (
+            <Leaderboard
+              gameName="Marbles"
+              isInAigram={isInAigram}
+              onClose={() => setShowLeaderboard(false)}
+              fetch={fetchLeaderboard}
+            />
           )}
         </>
       )}
