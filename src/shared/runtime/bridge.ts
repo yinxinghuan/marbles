@@ -184,30 +184,35 @@ export function postAigramAPI(url: string, data: unknown): void {
 
 // ─── System UI calls (AW.* protocol) ──────────────────────────────────────
 
-/** Open a user's Aigram profile. */
-export function openAigramProfile(userId: string): void {
-  if (!api_origin) return;
+// Dual-path sender for AW.* messages. Mirrors callAigramAPI's transport:
+// iOS WKWebView native bridge first, web iframe / Android WebView fallback.
+// The native side must register a handler for the AW.* prefix on its
+// `aigram` script-message handler (same handler that receives `callAPI-`).
+function sendAWMessage(msg: string): void {
+  const w = window as any;
   try {
-    const encoded = btoa(JSON.stringify({ id: userId }));
-    window.parent.postMessage(
-      `AW.PROFILE.OPEN-${encoded}`,
-      new URL(api_origin).origin,
-    );
+    if (w.webkit?.messageHandlers?.aigram) {
+      w.webkit.messageHandlers.aigram.postMessage(msg);
+      return;
+    }
+    if (api_origin) {
+      window.parent.postMessage(msg, new URL(api_origin).origin);
+    }
   } catch {
     /* ignore */
   }
 }
 
+/** Open a user's Aigram profile. */
+export function openAigramProfile(userId: string): void {
+  if (!userId) return;
+  const encoded = btoa(JSON.stringify({ id: userId }));
+  sendAWMessage(`AW.PROFILE.OPEN-${encoded}`);
+}
+
 /** Open a post by id. */
 export function openAigramPost(postId: string): void {
-  if (!api_origin) return;
-  try {
-    const encoded = btoa(JSON.stringify({ post_id: postId }));
-    window.parent.postMessage(
-      `AW.POST.OPEN-${encoded}`,
-      new URL(api_origin).origin,
-    );
-  } catch {
-    /* ignore */
-  }
+  if (!postId) return;
+  const encoded = btoa(JSON.stringify({ post_id: postId }));
+  sendAWMessage(`AW.POST.OPEN-${encoded}`);
 }
