@@ -137,6 +137,33 @@
     text-align: center;
     line-height: 1.5;
   }
+
+  &--download {
+    padding: 36px 20px 42px;
+  }
+
+  &__download {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 40px;
+    padding: 0 16px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 215, 0, 0.28);
+    background: rgba(255, 215, 0, 0.12);
+    color: #FFD700;
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0;
+    -webkit-tap-highlight-color: transparent;
+    transition: background 0.15s, transform 0.15s;
+
+    &:active {
+      background: rgba(255, 215, 0, 0.18);
+      transform: scale(0.97);
+    }
+  }
 }
 
 .lb-spinner {
