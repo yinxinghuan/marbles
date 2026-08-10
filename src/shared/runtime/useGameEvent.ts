@@ -5,7 +5,7 @@
 // triggers.
 
 import { useCallback } from 'react';
-import { postAigramAPI, isInAigram } from './bridge';
+import { postAigramAPI, isInAigramNow } from './bridge';
 import { getGameUuid } from './game-id';
 
 export interface UseGameEvent {
@@ -18,11 +18,11 @@ export interface UseGameEvent {
 
 export function useGameEvent(): UseGameEvent {
   const sessionId = getGameUuid();
-  const canEmit = isInAigram && !!sessionId;
+  const canEmit = isInAigramNow() && !!sessionId;
 
   const trigger = useCallback(
     (event: string, configJson?: object | string) => {
-      if (!canEmit || !sessionId || !event) return;
+      if (!isInAigramNow() || !sessionId || !event) return;
       const body: { session_id: string; event: string; config_json?: string } = {
         session_id: sessionId,
         event,
@@ -35,7 +35,7 @@ export function useGameEvent(): UseGameEvent {
       }
       postAigramAPI('/note/aigram/ai/game/record/play', body);
     },
-    [canEmit, sessionId],
+    [sessionId],
   );
 
   return { trigger, canEmit };

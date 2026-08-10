@@ -14,6 +14,8 @@ export {
   api_origin,
   telegramId,
   isInAigram,
+  isInAigramNow,
+  getTelegramId,
 } from './bridge';
 export type { AigramResponse } from './bridge';
 

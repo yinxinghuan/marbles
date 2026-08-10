@@ -1,5 +1,5 @@
 import { type CSSProperties, useEffect, useState } from 'react';
-import { openAigramProfile } from '../runtime/bridge';
+import { isInAigramNow, openAigramProfile } from '../runtime/bridge';
 import type { LeaderboardEntry } from './useGameScore';
 import './Leaderboard.less';
 
@@ -60,16 +60,12 @@ const ALTERU_APP_URL = 'https://apps.apple.com/app/id6769646546';
 
 // ─── Component ────────────────────────────────────────────────────────────
 
-export default function Leaderboard({ gameName, isInAigram, onClose, fetch }: Props) {
+export default function Leaderboard({ gameName,  onClose, fetch }: Props) {
   const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!isInAigram) {
-      setEntries([]);
-      setLoading(false);
-      return;
-    }
+    
 
     let alive = true;
     setLoading(true);
@@ -77,7 +73,7 @@ export default function Leaderboard({ gameName, isInAigram, onClose, fetch }: Pr
       .then(data => { if (alive) setEntries(data); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [fetch, isInAigram]);
+  }, [fetch]);
 
   return (
     <div className="lb-backdrop" onPointerDown={e => { if (e.target === e.currentTarget) onClose(); }}>
@@ -103,7 +99,7 @@ export default function Leaderboard({ gameName, isInAigram, onClose, fetch }: Pr
             </div>
           )}
 
-          {!loading && !isInAigram && (
+          {!loading && !isInAigramNow() && (
             <div className="lb-state lb-state--download">
               <span className="lb-state__icon">🏆</span>
               <span className="lb-state__text">{s.openInAlterU}</span>
@@ -118,19 +114,19 @@ export default function Leaderboard({ gameName, isInAigram, onClose, fetch }: Pr
             </div>
           )}
 
-          {!loading && isInAigram && entries.length === 0 && (
+          {!loading && isInAigramNow() && entries.length === 0 && (
             <div className="lb-state">
               <span className="lb-state__icon">🎮</span>
               <span className="lb-state__text">{s.empty}</span>
             </div>
           )}
 
-          {!loading && isInAigram && entries.map((entry, i) => (
+          {!loading && isInAigramNow() && entries.map((entry, i) => (
             <div
               key={entry.user_id}
-              className={`lb-row ${entry.isMe ? 'lb-row--me' : ''} ${i < 3 ? 'lb-row--top' : ''} ${isInAigram ? 'lb-row--clickable' : ''}`}
+              className={`lb-row ${entry.isMe ? 'lb-row--me' : ''} ${i < 3 ? 'lb-row--top' : ''} ${isInAigramNow() ? 'lb-row--clickable' : ''}`}
               style={i < 3 ? { '--medal-color': MEDAL_COLORS[i] } as CSSProperties : undefined}
-              onClick={isInAigram ? () => openAigramProfile(entry.user_id) : undefined}
+              onClick={isInAigramNow() ? () => openAigramProfile(entry.user_id) : undefined}
             >
               <div className="lb-row__rank">
                 {i < 3

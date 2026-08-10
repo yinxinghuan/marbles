@@ -4,7 +4,7 @@
 // PLATFORM RULE: do not accumulate locally. Re-fetch after every trigger.
 
 import { useCallback, useEffect, useState } from 'react';
-import { callAigramAPI, isInAigram, type AigramResponse } from './bridge';
+import { callAigramAPI, isInAigramNow, type AigramResponse } from './bridge';
 import { getGameUuid } from './game-id';
 
 export interface PlayStats {
@@ -37,13 +37,12 @@ export interface UseGameStats {
  */
 export function useGameStats(event: string): UseGameStats {
   const sessionId = getGameUuid();
-  const enabled = isInAigram && !!sessionId && !!event;
 
   const [stats, setStats] = useState<PlayStats>(EMPTY);
   const [loading, setLoading] = useState(false);
 
   const refresh = useCallback(async () => {
-    if (!enabled || !sessionId) {
+    if (!isInAigramNow() || !sessionId || !event) {
       setStats(EMPTY);
       return;
     }
@@ -59,7 +58,7 @@ export function useGameStats(event: string): UseGameStats {
     } finally {
       setLoading(false);
     }
-  }, [enabled, sessionId, event]);
+  }, [sessionId, event]);
 
   useEffect(() => {
     refresh();

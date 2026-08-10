@@ -7,8 +7,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   callAigramAPI,
-  isInAigram,
-  telegramId,
+  getTelegramId,
+  isInAigramNow,
   openAigramPost,
   type AigramResponse,
 } from '../runtime/bridge';
@@ -53,15 +53,16 @@ export function useGameScore() {
   // canRank: the platform requires a session_id on every endpoint, and the
   // submit endpoint additionally needs the host to inject the user's token,
   // which only happens when running inside Aigram.
-  const canRank = isInAigram && !!sessionId;
+  const canRank = !!sessionId;
 
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const userRef = useRef<CurrentUser | null>(null);
 
   useEffect(() => {
-    if (!isInAigram || !telegramId) return;
+    const currentTelegramId = getTelegramId();
+    if (!isInAigramNow() || !currentTelegramId) return;
     callAigramAPI<AigramResponse<CurrentUser>>(
-      `/note/telegram/user/get/info/by/telegram_id?telegram_id=${telegramId}`,
+      `/note/telegram/user/get/info/by/telegram_id?telegram_id=${currentTelegramId}`,
     )
       .then(res => {
         setCurrentUser(res.data);
@@ -74,7 +75,7 @@ export function useGameScore() {
 
   const submitScore = useCallback(
     async (score: number) => {
-      if (!canRank || !sessionId || score <= 0) return;
+      if (!sessionId || score <= 0) return;
       try {
         await callAigramAPI<AigramResponse<null>>(
           '/note/aigram/ai/game/rank/score/save',
@@ -85,41 +86,43 @@ export function useGameScore() {
         /* silent */
       }
     },
-    [canRank, sessionId],
+    [sessionId],
   );
 
   const fetchLeaderboard = useCallback(async (): Promise<LeaderboardEntry[]> => {
-    if (!canRank || !sessionId) return [];
+    if (!sessionId) return [];
     try {
       const res = await callAigramAPI<AigramResponse<RankRow[]>>(
         `/note/aigram/ai/game/rank/score/list/by/session_id?session_id=${encodeURIComponent(sessionId)}`,
         'GET',
       );
       const rows: RankRow[] = Array.isArray(res?.data) ? res.data : [];
+      const currentTelegramId = getTelegramId();
       return rows.map(r => ({
         user_id: String(r.user_id),
         name: r.user_name,
         avatar_url: r.head_url,
         score: Number(r.score),
         rank: r.rank,
-        isMe: telegramId != null && String(r.user_id) === telegramId,
+        isMe: currentTelegramId != null && String(r.user_id) === String(currentTelegramId),
       }));
     } catch {
       return [];
     }
-  }, [canRank, sessionId]);
+  }, [sessionId]);
 
   /** Share an image to Aigram chat stream as a post; returns the new post id. */
   const postToAigram = useCallback(
     async (photoUrl: string): Promise<string | null> => {
-      if (!isInAigram) throw new Error('not in aigram');
+      if (!isInAigramNow()) throw new Error('not in aigram');
+      const currentTelegramId = getTelegramId();
       const res = await callAigramAPI<{ data: string } | string>(
         '/note/telegram/note/add',
         'POST',
         {
           photo_url: photoUrl,
           type: 7,
-          telegram_id_list: telegramId ? [telegramId] : [],
+          telegram_id_list: currentTelegramId ? [currentTelegramId] : [],
           style: 'No Style',
         },
       );
@@ -134,8 +137,8 @@ export function useGameScore() {
   );
 
   return {
-    isInAigram,
-    telegramId,
+    isInAigram: isInAigramNow(),
+    telegramId: getTelegramId(),
     sessionId,
     canRank,
     currentUser,
