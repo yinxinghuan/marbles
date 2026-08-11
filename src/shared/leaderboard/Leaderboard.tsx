@@ -24,7 +24,7 @@ const STRINGS = {
 
 function detectLang(): 'zh' | 'en' {
   try {
-    const override = localStorage.getItem('game_locale');
+    const override = alteruLocalStorage.getItem('game_locale');
     if (override === 'zh' || override === 'en') return override;
   } catch { /* ignore */ }
   return navigator.language.toLowerCase().startsWith('zh') ? 'zh' : 'en';
